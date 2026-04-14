@@ -26,6 +26,7 @@ from app.schemas.crawl import ExtractedContact
 from app.schemas.property import PropertyUpsertFromCandidate
 from app.services.contact_service import ContactService
 from app.services.crawler_service import CrawlerService
+from app.services.dedup_service import DedupService
 from app.services.discovery_service import DiscoveryService
 from app.services.property_service import PropertyService
 from app.services.query_bank_service import QueryBankService
@@ -84,6 +85,7 @@ async def _process_one(
     crawler: CrawlerService,
     property_service: PropertyService,
     contact_service: ContactService,
+    dedup_service: DedupService,
     discovery_service: DiscoveryService,
 ) -> None:
     print(f"\n--- {candidate.name[:60]} ({candidate.id}) ---")
@@ -101,33 +103,64 @@ async def _process_one(
             f"{len(crawl_result.errors)} errors"
         )
 
-    # 2. Upsert property.
-    payload = PropertyUpsertFromCandidate(
-        candidate_id=candidate.id,
+    # 2. Dedup check BEFORE creating a property.
+    crawl_phones = (
+        [c.value for c in crawl_result.all_contacts() if c.contact_type == "phone"]
+        if crawl_result
+        else []
+    )
+    candidate_phones = list(filter(None, [candidate.phone, *crawl_phones]))
+
+    decision = await dedup_service.check_candidate(
+        google_place_id=candidate.external_id,
         canonical_name=candidate.name,
         city=candidate.city,
-        locality=candidate.locality,
         lat=candidate.lat,
         lng=candidate.lng,
-        property_type=candidate.property_type,  # type: ignore[arg-type]
-        google_place_id=candidate.external_id,
-        google_rating=candidate.google_rating,
-        google_review_count=candidate.google_review_count,
         website=candidate.website,
-        features_json=(
-            {
-                "amenities": crawl_result.unstructured_data.amenities,
-                "feature_tags": crawl_result.unstructured_data.feature_tags,
-                "description": crawl_result.unstructured_data.description,
-            }
-            if crawl_result
-            else {}
-        ),
+        phones=candidate_phones,
     )
-    prop = await property_service.upsert_from_candidate(payload)
-    print(f"   property: {prop.id}  ({'reused' if prop.canonical_phone else 'new'})")
 
-    # 3. Resolve contacts.
+    if decision.auto_merge and decision.matched_property_id is not None:
+        prop = await property_service.get(decision.matched_property_id)
+        print(
+            f"   dedup: AUTO-MERGE into {prop.id} (confidence={decision.confidence:.2f})"
+        )
+    else:
+        if decision.is_duplicate:
+            top = decision.candidates[0]
+            print(
+                f"   dedup: WARNING (confidence={decision.confidence:.2f}) — "
+                f"may duplicate '{top.canonical_name}' ({top.property_id})"
+            )
+
+        # 3. Upsert property (creates new or updates by place_id).
+        payload = PropertyUpsertFromCandidate(
+            candidate_id=candidate.id,
+            canonical_name=candidate.name,
+            city=candidate.city,
+            locality=candidate.locality,
+            lat=candidate.lat,
+            lng=candidate.lng,
+            property_type=candidate.property_type,  # type: ignore[arg-type]
+            google_place_id=candidate.external_id,
+            google_rating=candidate.google_rating,
+            google_review_count=candidate.google_review_count,
+            website=candidate.website,
+            features_json=(
+                {
+                    "amenities": crawl_result.unstructured_data.amenities,
+                    "feature_tags": crawl_result.unstructured_data.feature_tags,
+                    "description": crawl_result.unstructured_data.description,
+                }
+                if crawl_result
+                else {}
+            ),
+        )
+        prop = await property_service.upsert_from_candidate(payload)
+        print(f"   property: {prop.id}")
+
+    # 4. Resolve contacts (whether merged into existing or newly created).
     api_contacts = _api_contact_from_candidate(candidate)
     crawl_contacts = crawl_result.all_contacts() if crawl_result else []
     result = await contact_service.resolve_contacts(prop.id, api_contacts, crawl_contacts)
@@ -140,7 +173,7 @@ async def _process_one(
     print(f"   canonical phone: {result.canonical_phone}")
     print(f"   canonical email: {result.canonical_email}")
 
-    # 4. Mark candidate processed.
+    # 5. Mark candidate processed.
     await discovery_service.mark_processed(candidate.id)
 
 
@@ -162,6 +195,7 @@ async def main() -> None:
 
         property_service = PropertyService(db=db)
         contact_service = ContactService(db=db, property_service=property_service)
+        dedup_service = DedupService(db=db, property_service=property_service)
         # DiscoveryService just for mark_processed; pass None for google_client since unused.
         discovery_service = DiscoveryService(
             db=db,
@@ -176,7 +210,12 @@ async def main() -> None:
         for c in candidates:
             try:
                 await _process_one(
-                    c, crawler, property_service, contact_service, discovery_service
+                    c,
+                    crawler,
+                    property_service,
+                    contact_service,
+                    dedup_service,
+                    discovery_service,
                 )
                 success += 1
             except Exception as exc:  # noqa: BLE001
