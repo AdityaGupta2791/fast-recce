@@ -7,8 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/post-edit.sh",
-            "description": "Auto-lint Python (ruff) and typecheck TypeScript (tsc) after file edits"
+            "command": "bash .claude/hooks/post-edit.sh"
           }
         ]
       }

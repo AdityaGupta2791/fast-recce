@@ -62,6 +62,7 @@ dev = [
     "pytest-asyncio>=0.25.0",
     "pytest-cov>=6.0.0",
     "httpx>=0.28.0",
+    "aiosqlite>=0.20.0",
     "types-python-jose>=3.3.0",
     "types-passlib>=1.7.0",
 ]

@@ -13,8 +13,9 @@ from app.database import Base
 
 # Import all model modules so Base.metadata sees every table.
 # New model files must be imported here for autogenerate to detect them.
-# ruff: noqa: F401
-# (model imports will be added as modules are built)
+from app.models import discovery, query_bank, source  # noqa: F401,E402
+
+_MODELS_REGISTERED = (source, query_bank, discovery)
 
 config = context.config
 
@@ -26,6 +27,30 @@ config.set_main_option("sqlalchemy.url", str(settings.database_url))
 
 target_metadata = Base.metadata
 
+# PostGIS installs helper tables (spatial_ref_sys, state, cousub, etc.) into
+# the public schema. Autogenerate sees them as "not in models" and would try
+# to drop them. This filter skips anything not explicitly in our metadata.
+_POSTGIS_TABLES = {
+    "spatial_ref_sys",
+    "geography_columns",
+    "geometry_columns",
+    "layer",
+    "topology",
+    "raster_columns",
+    "raster_overviews",
+}
+
+
+def include_object(_obj, name, type_, reflected, _compare_to):  # type: ignore[no-untyped-def]
+    if type_ == "table":
+        if reflected and name not in target_metadata.tables:
+            return False
+        if name in _POSTGIS_TABLES:
+            return False
+    if type_ == "schema" and name in {"tiger", "tiger_data", "topology"}:
+        return False
+    return True
+
 
 def run_migrations_offline() -> None:
     """Run migrations in offline mode (SQL script generation only)."""
@@ -35,6 +60,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -46,6 +72,7 @@ def do_run_migrations(connection: Connection) -> None:
         target_metadata=target_metadata,
         compare_type=True,
         compare_server_default=True,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()

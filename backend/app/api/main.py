@@ -97,10 +97,14 @@ def _register_exception_handlers(app: FastAPI) -> None:
 
 def _register_routers(app: FastAPI) -> None:
     """Mount API routers under /api/v1. Routes added as modules are built."""
+    from app.api import queries, sources
 
     @app.get("/api/v1/health", tags=["health"])
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    app.include_router(sources.router)
+    app.include_router(queries.router)
 
 
 app = create_app()
