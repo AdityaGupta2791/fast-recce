@@ -1,0 +1,102 @@
+# ─────────────────────────────────────────────────────────────
+# FastRecce — .gitignore
+# ─────────────────────────────────────────────────────────────
+
+# ─── Secrets — NEVER commit these ───
+.env
+.env.*
+*.env
+!.env.example
+!.env.sample
+!.env.template
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+credentials.json
+service-account*.json
+secrets.yml
+secrets.yaml
+*.secrets.yml
+*.secrets.yaml
+
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+dist/
+build/
+*.pyc
+
+# ─── Node / Frontend ───
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+.eslintcache
+.turbo/
+.next/
+.nuxt/
+.cache/
+
+# ─── IDE / Editor ───
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Docker local volumes ───
+postgres_data/
+redis_data/
+minio_data/
+.docker/
+
+# ─── Logs ───
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ─── Playwright / Testing ───
+test-results/
+playwright-report/
+playwright/.cache/
+
+# ─── Prefect ───
+.prefect/
+
+# ─── Build artefacts / temp files ───
+tmp/
+temp/
+*.tmp
+*.bak
+*.backup
+*.orig
+
+# ─── OS-specific ───
+$RECYCLE.BIN/
+*.lnk
