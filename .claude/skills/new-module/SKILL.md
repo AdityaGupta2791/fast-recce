@@ -22,27 +22,32 @@ Invoke this skill when the user:
 
 ## Step 0 — Classify the Module
 
-**Before writing any files**, decide which template to use by reading `docs/module-breakdown.md` and `docs/api-spec.md` for the module:
+**Before writing any files**, decide which template to use by reading `docs/module-breakdown.md`, `docs/database-schema.md`, and `docs/api-spec.md` for the module:
 
-| Type | Decision Signal | Examples in FastRecce |
+| Type | Decision Signals | Examples in FastRecce |
 |---|---|---|
-| **CRUD** | Has user-facing endpoints in `docs/api-spec.md` | M1 Sources, M2 Query Bank, M9 Outreach |
-| **Pipeline-service** | No REST endpoints in `docs/api-spec.md` — triggered via the pipeline orchestrator | M3 Discovery, M4 Crawler, M5 Contacts, M6 Dedup, M7 Scoring, M8 Briefs |
+| **CRUD** | Has user-facing endpoints in `docs/api-spec.md`; owns one or more tables | M1 Sources, M2 Query Bank, M9 Outreach |
+| **Pipeline-service (with table)** | No REST endpoints; owns a staging/audit table consumed by later stages | M3 Discovery (`discovery_candidates`) |
+| **Pipeline-service (stateless)** | No REST endpoints; no new table — produces in-memory results consumed by another service or the orchestrator | M4 Crawler (outputs `CrawlResult` dataclass), M6 Dedup (writes to existing tables), M7 Scoring (updates existing rows) |
 
 **Tell the user which type you detected** before scaffolding. If ambiguous, ask.
 
 Key differences in what gets created:
 
-|  | CRUD | Pipeline-service |
-|---|---|---|
-| Model file | ✅ yes | ✅ yes |
-| Schema file | ✅ yes (Create/Update/Read) | ✅ yes (domain types like `RunRequest`, `RunResult`) |
-| Service file | ✅ yes (list/get/create/update) | ✅ yes (domain-specific methods per `service-design.md`) |
-| API router | ✅ yes | ❌ skip (not exposed) |
-| `api/deps.py` wiring | ✅ yes | Only if service is consumed by another REST endpoint |
-| `api/main.py` router mount | ✅ yes | ❌ skip |
-| Integration clients (`app/integrations/`) | ❌ typically not | ✅ often yes (e.g. Google Places, LLM, S3) |
-| Unit tests | ✅ yes | ✅ yes (mock external clients) |
+|  | CRUD | Pipeline w/ table | Pipeline stateless |
+|---|---|---|---|
+| Model file | ✅ yes | ✅ yes | ❌ skip |
+| Schema file | ✅ Create/Update/Read | ✅ plus RunRequest/RunResult | ✅ internal dataclasses only |
+| Service file | ✅ list/get/create/update | ✅ domain methods + run() | ✅ domain methods |
+| API router | ✅ yes | ❌ skip | ❌ skip |
+| `api/deps.py` wiring | ✅ yes | Only if exposed via another endpoint | Only if exposed via another endpoint |
+| `api/main.py` router mount | ✅ yes | ❌ skip | ❌ skip |
+| `alembic/env.py` import | ✅ required | ✅ required | ❌ skip (no model) |
+| `tests/conftest.py` import | ✅ required | ✅ required | ❌ skip |
+| Integration clients (`app/integrations/`) | rarely | often (API clients) | often (HTTP fetchers, LLM, parsers) |
+| Extractors / sub-components (`services/extractors/`, etc.) | rarely | sometimes | often (separate stateless classes) |
+| Unit tests | CRUD paths | service + mocked client | extractors individually + service with mocked HTTP |
+| CLI helper (`scripts/`) | optional | yes (for ops/smoke runs) | yes (for debugging) |
 
 ---
 
@@ -390,6 +395,10 @@ Do NOT run `alembic revision --autogenerate` manually — the `/add-migration` s
 | PG-specific `ON CONFLICT` breaks SQLite tests | Use `try/except IntegrityError` for portability |
 | Tests pass but real request fails | Service uses columns not in schema — re-check `docs/database-schema.md` |
 | Unused-import linter warnings on model registration | Reference imports explicitly: `_MODELS_REGISTERED = (a, b, c)` |
+| External API returns HTTP 200 with empty body | Often a billing/quota/permissions issue — debug with curl/raw HTTP before assuming code bug |
+| Unicode characters in CLI output crash Windows console | Use ASCII markers (`OK`/`XX`) instead of `✓`/`✗` in any `scripts/` helpers |
+| Paginated API calls fail on page 2+ | Many APIs (Google Places New) require resending ALL original parameters on subsequent pages — don't replace the request body |
+| "Pipeline stateless" module keeps writing empty migration files | The module doesn't own a table — skip `/add-migration` entirely |
 
 ---
 
