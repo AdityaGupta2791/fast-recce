@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     # --- External APIs ---
     google_places_api_key: str
     gemini_api_key: str
-    gemini_model: str = "gemini-3-flash"
+    gemini_model: str = "gemini-3-flash-preview"
 
     # --- Rate limits ---
     google_places_rate_limit_rpm: int = 60
