@@ -18,9 +18,9 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.database import Base
-from app.models import discovery, query_bank, source  # noqa: F401 — register models
+from app.models import contact, discovery, property, query_bank, source  # noqa: F401,A004
 
-_MODELS_REGISTERED = (source, query_bank, discovery)
+_MODELS_REGISTERED = (source, query_bank, discovery, property, contact)
 
 
 @pytest.fixture

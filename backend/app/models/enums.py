@@ -48,6 +48,31 @@ CANDIDATE_STATUSES: Final[tuple[str, ...]] = (
     "skipped_duplicate",# filtered by dedup before processing
 )
 
+PROPERTY_STATUSES: Final[tuple[str, ...]] = (
+    "new",              # just created from a candidate, not yet reviewed
+    "reviewed",         # reviewer opened it but didn't approve/reject
+    "approved",         # approved for outreach
+    "rejected",         # not a fit; never contact
+    "onboarded",        # successfully onboarded onto FastRecce
+    "do_not_contact",   # any contact attempt is forbidden (compliance)
+)
+
+CONTACT_TYPES: Final[tuple[str, ...]] = (
+    "phone",
+    "email",
+    "whatsapp",
+    "form",
+    "website",
+    "instagram",
+)
+
+DNC_CONTACT_TYPES: Final[tuple[str, ...]] = (
+    "phone",
+    "email",
+    "whatsapp",
+    "domain",            # block an entire website domain
+)
+
 
 def check_constraint(values: tuple[str, ...]) -> str:
     """Render a SQL CHECK constraint clause for a column.
