@@ -57,6 +57,32 @@ class PropertyRead(BaseModel):
     updated_at: datetime
 
 
+class PropertyListItem(BaseModel):
+    """Compact projection for the Lead Queue list view."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    canonical_name: str
+    city: str
+    locality: str | None
+    property_type: PropertyType
+    status: str
+    relevance_score: float | None
+    short_brief: str | None
+    canonical_phone: str | None
+    canonical_email: str | None
+    canonical_website: str | None
+    google_rating: float | None
+
+
+class PropertyDetail(PropertyRead):
+    """Lead queue detail view — includes nested contacts and outreach."""
+
+    contacts: list[dict[str, Any]] = Field(default_factory=list)
+    outreach: dict[str, Any] | None = None
+
+
 class PropertyUpsertFromCandidate(BaseModel):
     """Input the pipeline hands to PropertyService when promoting a candidate."""
 

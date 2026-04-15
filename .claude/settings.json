@@ -1,18 +1,5 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash .claude/hooks/post-edit.sh"
-          }
-        ]
-      }
-    ]
-  },
   "permissions": {
     "allow": [
       "Bash(uv:*)",
@@ -26,7 +13,22 @@
       "Bash(pytest:*)",
       "Bash(ruff:*)",
       "Bash(mypy:*)",
-      "Bash(bash .claude/hooks/*)"
+      "Bash(bash .claude/hooks/*)",
+      "Bash(curl -s -X POST http://127.0.0.1:8000/api/v1/auth/login -H \"Content-Type: application/json\" -d '{\"email\":\"admin@fastrecce.com\",\"password\":\"adminpass123\"}')",
+      "Bash(\"c:/Users/Aditya Gupta/Desktop/FastRecce/backend/.venv/Scripts/python.exe\" -c \"import json,sys;d=json.load\\(sys.stdin\\);print\\(json.dumps\\(d,indent=2\\)\\)\")"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/post-edit.sh"
+          }
+        ]
+      }
     ]
   }
 }

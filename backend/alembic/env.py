@@ -13,9 +13,17 @@ from app.database import Base
 
 # Import all model modules so Base.metadata sees every table.
 # New model files must be imported here for autogenerate to detect them.
-from app.models import contact, discovery, property, query_bank, source  # noqa: F401,E402,A004
+from app.models import (  # noqa: F401,E402,A004
+    contact,
+    discovery,
+    outreach,
+    property,
+    query_bank,
+    source,
+    user,
+)
 
-_MODELS_REGISTERED = (source, query_bank, discovery, property, contact)
+_MODELS_REGISTERED = (source, query_bank, discovery, property, contact, user, outreach)
 
 config = context.config
 
