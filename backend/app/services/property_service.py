@@ -112,6 +112,42 @@ class PropertyService:
         await self.db.refresh(prop)
         return prop
 
+    # --- Public search read (product pivot) ---
+
+    async def find_by_location_hint(
+        self,
+        *,
+        city_hint: str,
+        limit: int = 10,
+        include_duplicates: bool = False,
+    ) -> list[Property]:
+        """Return non-duplicate properties whose location matches the hint.
+
+        Google Places often assigns narrow sub-localities (e.g. 'Chaul',
+        'Nagaon') to properties in the Alibaug district. Exact matching on
+        `city` misses them. This method ALSO matches when the hint appears
+        in `locality` or `canonical_name`. Ranked by relevance_score DESC.
+        """
+        pattern = f"%{city_hint.lower()}%"
+        hint_filter = (
+            (func.lower(Property.city).like(pattern))
+            | (func.lower(Property.locality).like(pattern))
+            | (func.lower(Property.canonical_name).like(pattern))
+        )
+        stmt = (
+            select(Property)
+            .where(hint_filter)
+            .order_by(
+                Property.relevance_score.desc().nulls_last(),
+                Property.created_at.desc(),
+            )
+            .limit(limit)
+        )
+        if not include_duplicates:
+            stmt = stmt.where(Property.is_duplicate.is_(False))
+        rows = (await self.db.execute(stmt)).scalars().all()
+        return list(rows)
+
     # --- Dashboard read (M9) ---
 
     async def list_for_dashboard(

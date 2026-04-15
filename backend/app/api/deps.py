@@ -10,12 +10,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings, get_settings
 from app.database import get_db
 from app.exceptions import ForbiddenError, UnauthorizedError
+from app.integrations.google_places import GooglePlacesClient
+from app.integrations.llm import LLMClient
 from app.models.user import User
 from app.services.analytics_service import AnalyticsService
 from app.services.auth_service import TokenClaims, decode_token
+from app.services.briefing_service import BriefingService
+from app.services.contact_service import ContactService
+from app.services.crawler_service import CrawlerService
+from app.services.dedup_service import DedupService
+from app.services.discovery_service import DiscoveryService
 from app.services.outreach_service import OutreachService
 from app.services.property_service import PropertyService
 from app.services.query_bank_service import QueryBankService
+from app.services.scoring_service import ScoringService
+from app.services.search_service import SearchService
 from app.services.source_service import SourceService
 from app.services.user_service import UserService
 
@@ -57,6 +66,64 @@ async def get_analytics_service(
     db: AsyncSession = Depends(get_db),
 ) -> AsyncGenerator[AnalyticsService, None]:
     yield AnalyticsService(db=db)
+
+
+# --- Search (product pivot) ---
+
+
+async def get_search_service(
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> AsyncGenerator[SearchService, None]:
+    """Constructs the full search pipeline with its own Google + LLM clients.
+
+    Each request gets fresh external clients; we rely on request-scoped
+    httpx/genai resources to be cleaned up when the generator completes.
+    """
+    google_client = GooglePlacesClient(
+        api_key=settings.google_places_api_key,
+        timeout_seconds=20.0,
+    )
+    llm_client = LLMClient(
+        api_key=settings.gemini_api_key,
+        model=settings.gemini_model,
+    )
+    try:
+        async with google_client:
+            property_service = PropertyService(db=db)
+            contact_service = ContactService(db=db, property_service=property_service)
+            discovery_service = DiscoveryService(
+                db=db,
+                google_client=google_client,
+                source_service=SourceService(db=db),
+                query_bank_service=QueryBankService(db=db),
+            )
+            crawler_service = CrawlerService()
+            dedup_service = DedupService(db=db, property_service=property_service)
+            scoring_service = ScoringService(
+                db=db,
+                llm_client=llm_client,
+                property_service=property_service,
+                contact_service=contact_service,
+            )
+            briefing_service = BriefingService(
+                db=db,
+                llm_client=llm_client,
+                property_service=property_service,
+                contact_service=contact_service,
+            )
+            yield SearchService(
+                db=db,
+                discovery_service=discovery_service,
+                crawler_service=crawler_service,
+                contact_service=contact_service,
+                dedup_service=dedup_service,
+                property_service=property_service,
+                scoring_service=scoring_service,
+                briefing_service=briefing_service,
+            )
+    finally:
+        await llm_client.close()
 
 
 # --- Auth dependencies ---

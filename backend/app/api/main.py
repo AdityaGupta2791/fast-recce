@@ -103,6 +103,7 @@ def _register_routers(app: FastAPI) -> None:
         outreach,
         properties,
         queries,
+        search,
         sources,
     )
 
@@ -116,6 +117,7 @@ def _register_routers(app: FastAPI) -> None:
     app.include_router(properties.router)
     app.include_router(outreach.router)
     app.include_router(analytics.router)
+    app.include_router(search.router)
 
 
 app = create_app()

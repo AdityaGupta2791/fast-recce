@@ -1,0 +1,70 @@
+"""Public search schemas — used by the user-facing search flow (product pivot).
+
+Separate from the admin dashboard schemas so we can evolve the shape of the
+end-user API without breaking the review/outreach surfaces the senior
+asked us to leave alone.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Literal
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.schemas.query_bank import PropertyType
+
+
+class SearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Free-text query the user types. We try to infer city + property_type
+    # from it if those fields aren't provided explicitly.
+    query: str = Field(min_length=2, max_length=300)
+
+    city: str | None = Field(default=None, max_length=100)
+    property_type: PropertyType | None = None
+
+    max_results: int = Field(default=10, ge=1, le=30)
+
+
+class SearchSubScore(BaseModel):
+    name: str
+    value: float = Field(ge=0.0, le=1.0)
+    weight: float
+    source: Literal["deterministic", "llm", "fallback"]
+
+
+class SearchResultItem(BaseModel):
+    """Compact projection returned to end users. No review/outreach fields."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    canonical_name: str
+    city: str
+    locality: str | None
+    property_type: str
+    relevance_score: float | None
+    short_brief: str | None
+    canonical_phone: str | None
+    canonical_email: str | None
+    canonical_website: str | None
+    google_rating: float | None
+    google_review_count: int | None
+
+    # Optional UX helpers:
+    sub_scores: list[SearchSubScore] = Field(default_factory=list)
+    features: dict[str, Any] = Field(default_factory=dict)
+
+
+class SearchResponse(BaseModel):
+    query: str
+    inferred_city: str | None
+    inferred_property_type: str | None
+    results: list[SearchResultItem]
+    candidates_discovered: int
+    candidates_new: int
+    candidates_skipped_known: int
+    duration_seconds: float
+    errors: list[str] = Field(default_factory=list)

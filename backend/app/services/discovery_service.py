@@ -16,6 +16,7 @@ candidate table alone; M6 (Dedup) will extend this when properties exist.
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
@@ -30,10 +31,21 @@ from app.integrations.google_places import (
     PlaceSearchResult,
 )
 from app.models.discovery import DiscoveryCandidate
-from app.models.query_bank import QueryBank
 from app.schemas.discovery import DiscoveryRunResult
 from app.services.query_bank_service import QueryBankService
 from app.services.source_service import SourceService
+
+
+@dataclass
+class AdHocDiscoveryResult:
+    """Return shape for `discover_ad_hoc`. Internal — not surfaced via API."""
+
+    google_results_total: int
+    candidates_created: int
+    candidates_skipped_known: int
+    new_candidates: list[DiscoveryCandidate]
+    errors: list[str] = field(default_factory=list)
+    duration_seconds: float = 0.0
 
 # Rough mapping from Google's place types to FastRecce property_type.
 # First match wins. Fallback to the query's property_type if nothing matches.
@@ -123,7 +135,14 @@ class DiscoveryService:
                     )
                     continue
 
-                candidate = self._to_candidate(details, result, query)
+                candidate = self._to_candidate(
+                    details,
+                    result,
+                    query_id=query.id,
+                    fallback_city=query.city,
+                    fallback_locality=query.locality,
+                    fallback_property_type=query.property_type,
+                )
                 was_inserted = await self._upsert_candidate(candidate)
                 if was_inserted:
                     created += 1
@@ -146,6 +165,115 @@ class DiscoveryService:
             google_results_total=google_total,
             candidates_created=created,
             candidates_skipped_known=skipped_known,
+            errors=errors,
+            duration_seconds=round(time.monotonic() - start, 3),
+        )
+
+    async def _find_known_place_ids_ext(self, place_ids: list[str]) -> set[str]:
+        """Extended dedup: known if in `discovery_candidates` OR `properties`.
+
+        Used by the ad-hoc (user-initiated) search path so repeat searches
+        don't re-hit Google for places we already have a canonical row for.
+        """
+        from app.models.property import Property
+
+        if not place_ids:
+            return set()
+
+        candidate_ids = await self._find_known_place_ids(place_ids)
+
+        stmt = select(Property.google_place_id).where(
+            Property.google_place_id.in_(place_ids)
+        )
+        rows = (await self.db.execute(stmt)).all()
+        property_ids = {row[0] for row in rows if row[0]}
+
+        return candidate_ids | property_ids
+
+    async def discover_ad_hoc(
+        self,
+        *,
+        query_text: str,
+        city: str | None = None,
+        property_type: str | None = None,
+    ) -> "AdHocDiscoveryResult":
+        """Single user-initiated search. No QueryBank row; no yield tracking.
+
+        `city` and `property_type` are OPTIONAL hints. When present they are
+        used as fallbacks in case Google's addressComponents / place types
+        don't give us a clean value. They are NOT used to filter or validate
+        the query — we hand the raw `query_text` to Google's geocoder and
+        trust its worldwide knowledge.
+
+        Per-item failures are captured in `errors[]` instead of raising so
+        the caller can still surface partial results.
+        """
+        if not await self.source_service.is_source_allowed(_SOURCE_NAME):
+            raise ForbiddenError(
+                "Source 'google_places' is disabled or restricted. "
+                "Enable it in the source registry before searching."
+            )
+
+        start = time.monotonic()
+        errors: list[str] = []
+        new_candidates: list[DiscoveryCandidate] = []
+        created = 0
+        skipped_known = 0
+
+        try:
+            results = await self.google.text_search(query_text)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"text_search failed for '{query_text}': {exc}")
+            return AdHocDiscoveryResult(
+                google_results_total=0,
+                candidates_created=0,
+                candidates_skipped_known=0,
+                new_candidates=[],
+                errors=errors,
+                duration_seconds=round(time.monotonic() - start, 3),
+            )
+
+        known_ids = await self._find_known_place_ids_ext(
+            [r.place_id for r in results]
+        )
+
+        for result in results:
+            if result.place_id in known_ids:
+                skipped_known += 1
+                continue
+            try:
+                details = await self.google.get_place_details(result.place_id)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"get_place_details failed for {result.place_id}: {exc}")
+                continue
+
+            payload = self._to_candidate(
+                details,
+                result,
+                query_id=None,
+                fallback_city=city,
+                fallback_locality=None,
+                fallback_property_type=property_type,
+            )
+
+            new_row = DiscoveryCandidate(**payload)
+            self.db.add(new_row)
+            try:
+                await self.db.flush()
+            except IntegrityError:
+                # Another concurrent run already inserted this place_id.
+                await self.db.rollback()
+                skipped_known += 1
+                continue
+            await self.db.refresh(new_row)
+            new_candidates.append(new_row)
+            created += 1
+
+        return AdHocDiscoveryResult(
+            google_results_total=len(results),
+            candidates_created=created,
+            candidates_skipped_known=skipped_known,
+            new_candidates=new_candidates,
             errors=errors,
             duration_seconds=round(time.monotonic() - start, 3),
         )
@@ -224,19 +352,33 @@ class DiscoveryService:
         self,
         details: PlaceDetails,
         search: PlaceSearchResult,
-        query: QueryBank,
+        *,
+        query_id: UUID | None,
+        fallback_city: str | None,
+        fallback_locality: str | None,
+        fallback_property_type: str | None,
     ) -> dict[str, Any]:
-        """Map Google result to a dict suitable for INSERT into discovery_candidates."""
+        """Map a Google result to an INSERT-ready candidate dict.
+
+        Accepts plain values rather than a `QueryBank` so the ad-hoc search
+        path can call this without inventing a fake QueryBank row.
+
+        `fallback_city` / `fallback_property_type` may be None — the ad-hoc
+        search path doesn't always have pre-inferred values. When both the
+        Google response AND the fallback are empty we default to sentinel
+        strings ("Unknown" / "other") so the candidate still lands in the DB;
+        admins can reclassify later.
+        """
         city, locality = _extract_city_locality(
-            details.address_components, query.city, query.locality
+            details.address_components, fallback_city, fallback_locality
         )
         return {
             "source_name": _SOURCE_NAME,
             "external_id": details.place_id,
-            "query_id": query.id,
+            "query_id": query_id,
             "name": details.name or search.name,
             "address": details.address,
-            "city": city,
+            "city": city or "Unknown",
             "locality": locality,
             "lat": details.lat,
             "lng": details.lng,
@@ -245,7 +387,9 @@ class DiscoveryService:
             "google_rating": details.rating,
             "google_review_count": details.review_count,
             "google_types": list(details.types),
-            "property_type": _infer_property_type(details.types, query.property_type),
+            "property_type": _infer_property_type(
+                details.types, fallback_property_type or "other"
+            ),
             "raw_result_json": {
                 "search": search.raw,
                 "details": details.raw,
@@ -268,16 +412,20 @@ def _infer_property_type(google_types: list[str], fallback: str) -> str:
 
 def _extract_city_locality(
     address_components: list[dict[str, Any]],
-    fallback_city: str,
+    fallback_city: str | None,
     fallback_locality: str | None,
-) -> tuple[str, str | None]:
+) -> tuple[str | None, str | None]:
     """Pull city and locality from Google's addressComponents list.
 
     Google's `types` for Indian addresses commonly include:
       - 'locality' → city name (e.g. Mumbai)
       - 'sublocality_level_1' → neighborhood (e.g. Bandra West)
+
+    Returns `(city, locality)` — either can be None if Google didn't provide
+    it AND no fallback was passed. Caller is responsible for supplying a
+    default when a DB NOT-NULL constraint requires one.
     """
-    city = fallback_city
+    city: str | None = fallback_city
     locality = fallback_locality
     for comp in address_components:
         types = comp.get("types") or []

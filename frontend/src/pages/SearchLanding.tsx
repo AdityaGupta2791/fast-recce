@@ -1,0 +1,83 @@
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
+
+const EXAMPLES = [
+  "resorts in Alibaug",
+  "heritage bungalows in Mumbai",
+  "boutique hotels in Lonavala",
+  "farmhouses in Pune",
+];
+
+export function SearchLandingPage() {
+  const navigate = useNavigate();
+  const [query, setQuery] = useState("");
+
+  function submit(q: string) {
+    const trimmed = q.trim();
+    if (trimmed.length < 2) return;
+    const params = new URLSearchParams({ q: trimmed });
+    navigate(`/search/results?${params.toString()}`);
+  }
+
+  return (
+    <div className="flex min-h-[calc(100vh-4rem)] items-center justify-center px-6">
+      <div className="w-full max-w-2xl text-center">
+        <h1 className="text-4xl font-semibold tracking-tight">
+          Find your next shoot location
+        </h1>
+        <p className="mx-auto mt-3 max-w-lg text-muted-foreground">
+          Search properties across India for filming, weddings, and brand
+          shoots. Results include contact details so you can reach out
+          directly.
+        </p>
+
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            submit(query);
+          }}
+          className="mt-8 flex items-center gap-2"
+        >
+          <input
+            autoFocus
+            type="text"
+            placeholder="e.g. resorts in Alibaug"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            className="flex-1 rounded-md border border-border bg-background px-4 py-3 text-base outline-none focus:ring-2 focus:ring-primary"
+          />
+          <button
+            type="submit"
+            className="rounded-md bg-primary px-5 py-3 text-base font-medium text-primary-foreground hover:opacity-95"
+          >
+            Search
+          </button>
+        </form>
+
+        <div className="mt-6 space-y-2">
+          <div className="text-xs text-muted-foreground">Try an example</div>
+          <div className="flex flex-wrap justify-center gap-2">
+            {EXAMPLES.map((ex) => (
+              <button
+                key={ex}
+                type="button"
+                onClick={() => {
+                  setQuery(ex);
+                  submit(ex);
+                }}
+                className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted"
+              >
+                {ex}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <p className="mt-10 text-xs text-muted-foreground">
+          First search for a city takes ~30-60 seconds while we scrape fresh
+          data. Cached queries return instantly.
+        </p>
+      </div>
+    </div>
+  );
+}
