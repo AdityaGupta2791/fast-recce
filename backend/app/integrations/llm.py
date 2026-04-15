@@ -44,6 +44,14 @@ class LLMScoreResult:
     source: str
 
 
+@dataclass
+class LLMTextResult:
+    """Result returned for free-form text generation (briefs, outreach angles)."""
+
+    text: str
+    source: str  # "llm" | "fallback"
+
+
 # Keywords that strongly suggest shoot-readiness (used in fallback heuristic).
 _SHOOT_FIT_KEYWORDS = {
     "photoshoot", "photo shoot", "film shoot", "shoot-ready", "film friendly",
@@ -123,6 +131,102 @@ class LLMClient:
             prompt=prompt,
             fallback=self._visual_uniqueness_heuristic,
             fallback_args=(property_type, feature_tags),
+        )
+
+    async def generate_brief(
+        self,
+        *,
+        property_name: str,
+        city: str,
+        locality: str | None,
+        property_type: str,
+        description: str | None,
+        amenities: list[str],
+        feature_tags: list[str],
+        top_score_factors: list[str],
+        contact_summary: str,
+    ) -> LLMTextResult:
+        """Generate a 2-3 sentence operational brief for reviewers.
+
+        Tone: operational (not marketing). Reviewers need to decide fast:
+        is this property a good shoot fit, is it reachable, what stands out.
+        """
+        prompt = (
+            f"Property: {property_name}\n"
+            f"Type: {property_type}\n"
+            f"Location: {locality + ', ' if locality else ''}{city}\n"
+            f"Description: {description or '(no description available)'}\n"
+            f"Amenities: {', '.join(amenities) if amenities else '(none extracted)'}\n"
+            f"Feature tags: {', '.join(feature_tags) if feature_tags else '(none)'}\n"
+            f"Top scoring factors: {', '.join(top_score_factors) if top_score_factors else '(n/a)'}\n"
+            f"Contactability: {contact_summary}\n"
+            "\n"
+            "Write a 2-3 sentence operational brief for a FastRecce reviewer who\n"
+            "is deciding whether to approve this property for shoot-location outreach.\n"
+            "Tone: operational, factual, no marketing fluff. Structure:\n"
+            "  1. What the property is (type + location + 1-2 distinctive features)\n"
+            "  2. Why it's (or isn't) a fit for shoots\n"
+            "  3. How reachable it is\n"
+            "Return only the brief text — no headings, no bullet points."
+        )
+
+        try:
+            response = await self._client.aio.models.generate_content(
+                model=self._model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.3,
+                    max_output_tokens=1000,
+                    thinking_config=types.ThinkingConfig(thinking_budget=256),
+                ),
+            )
+        except genai_errors.ClientError as exc:
+            logger.warning("Gemini ClientError generating brief, using fallback: %s", exc)
+            return LLMTextResult(
+                text=self._brief_fallback(
+                    property_name, property_type, city, amenities, contact_summary
+                ),
+                source="fallback",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Gemini unavailable for brief, using fallback: %s", exc)
+            return LLMTextResult(
+                text=self._brief_fallback(
+                    property_name, property_type, city, amenities, contact_summary
+                ),
+                source="fallback",
+            )
+
+        text = getattr(response, "text", None)
+        if isinstance(text, str) and text.strip():
+            return LLMTextResult(text=text.strip(), source="llm")
+
+        return LLMTextResult(
+            text=self._brief_fallback(
+                property_name, property_type, city, amenities, contact_summary
+            ),
+            source="fallback",
+        )
+
+    @staticmethod
+    def _brief_fallback(
+        property_name: str,
+        property_type: str,
+        city: str,
+        amenities: list[str],
+        contact_summary: str,
+    ) -> str:
+        """Template-based brief when LLM is unavailable. Stays operational."""
+        pretty_type = property_type.replace("_", " ")
+        amenity_clause = (
+            f" with {', '.join(amenities[:4])}"
+            if amenities
+            else ""
+        )
+        return (
+            f"{property_name} is a {pretty_type} in {city}{amenity_clause}. "
+            f"Shoot fit to be evaluated on site visit. "
+            f"Contactability: {contact_summary}."
         )
 
     # --- Internals ---
