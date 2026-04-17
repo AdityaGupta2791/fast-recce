@@ -370,10 +370,13 @@ async def test_search_skips_known_candidates_already_in_db(
     assert any(r.canonical_name == "Ocean Resort" for r in resp.results)
 
 
-async def test_search_refuses_when_google_source_disabled(
+async def test_search_surfaces_error_when_google_source_disabled(
     db_session: AsyncSession,
 ) -> None:
-    from app.exceptions import ForbiddenError
+    """With the source router, a disabled Google source no longer raises —
+    it's reported as a path error so the response can still carry results
+    from other sources (Airbnb on residential routes) or at least render
+    an empty state + explanation for commercial routes."""
     from app.schemas.source import SourceUpdate
 
     source_service = SourceService(db=db_session)
@@ -390,5 +393,13 @@ async def test_search_refuses_when_google_source_disabled(
     google = FakeGoogleClient()
     service = _make_service(db_session, google, FakeLLMClient())
 
-    with pytest.raises(ForbiddenError):
-        await service.search(SearchRequest(query="resorts in Alibaug"))
+    resp = await service.search(SearchRequest(query="resorts in Alibaug"))
+
+    # No result rows because discovery never ran.
+    assert resp.candidates_new == 0
+    # A clear explanation in errors — the API layer or UI can translate this
+    # to a 503 banner if it wants.
+    assert any(
+        "google" in e.lower() and ("disabled" in e.lower() or "forbidden" in e.lower())
+        for e in resp.errors
+    )

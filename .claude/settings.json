@@ -30,7 +30,26 @@
       "Bash(curl -s -o /dev/null -w \"vite http %{http_code}\\\\n\" http://localhost:5173/)",
       "Bash(\"c:/Users/Aditya Gupta/Desktop/FastRecce/backend/.venv/Scripts/python.exe\" -c \"import json,sys;d=json.load\\(sys.stdin\\);print\\(f'Analytics: {d[\\\\\"properties\\\\\"][\\\\\"total\\\\\"]} properties total, {d[\\\\\"outreach\\\\\"][\\\\\"pending\\\\\"]} outreach pending'\\)\")",
       "Bash(\"./.venv/Scripts/python.exe\" -m pytest tests/unit/test_search_service.py::test_extract_location_hint_strips_type_and_stopwords -v)",
-      "Bash(curl -s -X POST http://127.0.0.1:8000/api/v1/search -H \"Content-Type: application/json\" -d '{\"query\":\"resorts in Bandra\",\"max_results\":5}')"
+      "Bash(curl -s -X POST http://127.0.0.1:8000/api/v1/search -H \"Content-Type: application/json\" -d '{\"query\":\"resorts in Bandra\",\"max_results\":5}')",
+      "Bash(\"./.venv/Scripts/python.exe\" -m pytest tests/unit/test_google_type_blocklist.py -v)",
+      "Bash(\"./.venv/Scripts/python.exe\" -m pytest tests/unit/test_search_service.py tests/unit/test_discovery_service.py)",
+      "Bash(\"./.venv/Scripts/python.exe\" -m pytest tests/unit/test_duckduckgo_client.py -v)",
+      "Bash(\"./.venv/Scripts/python.exe\" -m pytest tests/unit/test_airbnb_scraper.py -v)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit -x --tb=short)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/test_search_service.py::test_search_refuses_when_google_source_disabled -x --tb=long)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit --tb=short)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit --tb=short -q)",
+      "Bash(curl -s -X POST http://127.0.0.1:8000/api/v1/search -H \"Content-Type: application/json\" -d \"{\\\\\"query\\\\\":\\\\\"property in Karjat\\\\\",\\\\\"max_results\\\\\":5}\")",
+      "Bash(./.venv/Scripts/python.exe -c \"import asyncio; from app.integrations.duckduckgo import DuckDuckGoClient; c = DuckDuckGoClient\\(per_request_delay_seconds=0\\); print\\('karjat:', asyncio.run\\(c.find_airbnb_listing_urls\\('property in Karjat', limit=5\\)\\)\\); print\\('alibaug:', asyncio.run\\(c.find_airbnb_listing_urls\\('villa in Alibaug', limit=5\\)\\)\\)\")",
+      "Bash(./.venv/Scripts/python.exe -c ' *)",
+      "Bash(./.venv/Scripts/python.exe -m pip install ddgs)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/test_duckduckgo_client.py tests/unit/test_source_router.py tests/unit/test_search_service.py -q)",
+      "Bash(curl -s -X POST http://127.0.0.1:8000/api/v1/search -H \"Content-Type: application/json\" -d \"{\\\\\"query\\\\\":\\\\\"property in mumbai\\\\\",\\\\\"max_results\\\\\":5}\")",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit/test_duckduckgo_client.py -q)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/unit -q)",
+      "Bash(curl -s -X POST http://127.0.0.1:8000/api/v1/search -H \"Content-Type: application/json\" -d \"{\\\\\"query\\\\\":\\\\\"property in malad\\\\\",\\\\\"max_results\\\\\":5}\")",
+      "Bash(curl -s -X POST http://127.0.0.1:8000/api/v1/search -H \"Content-Type: application/json\" -d \"{\\\\\"query\\\\\":\\\\\"property in mumbai\\\\\",\\\\\"max_results\\\\\":5}\" --max-time 180)",
+      "Bash(curl -s -X POST http://127.0.0.1:8000/api/v1/search -H \"Content-Type: application/json\" -d \"{\\\\\"query\\\\\":\\\\\"property in kandivali\\\\\",\\\\\"max_results\\\\\":3}\" --max-time 240)"
     ]
   },
   "hooks": {

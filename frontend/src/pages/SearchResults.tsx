@@ -9,9 +9,9 @@ import { ScoreBadge } from "@/components/ScoreBadge";
 
 const PROGRESS_STAGES = [
   "Searching Google Places…",
+  "Searching Airbnb listings…",
   "Fetching place details…",
-  "Crawling property websites…",
-  "Extracting contacts and amenities…",
+  "Extracting amenities and photos…",
   "Scoring and writing briefs…",
   "Assembling results…",
 ];
@@ -159,9 +159,13 @@ function ResultsList({
 function ResultCard({ result }: { result: SearchResultItem }) {
   return (
     <li className="rounded-md border border-border bg-background p-5 transition-colors hover:border-primary/40">
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex items-start gap-4">
+        <Thumbnail
+          src={result.primary_image_url}
+          alt={result.canonical_name}
+        />
         <div className="min-w-0 flex-1">
-          <div className="mb-1 flex items-center gap-2">
+          <div className="mb-1 flex flex-wrap items-center gap-2">
             <ScoreBadge score={result.relevance_score} />
             <span className="text-xs uppercase text-muted-foreground">
               {result.property_type.replace(/_/g, " ")}
@@ -192,37 +196,72 @@ function ResultCard({ result }: { result: SearchResultItem }) {
               {result.short_brief}
             </p>
           ) : null}
+
+          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
+            {result.canonical_phone ? (
+              <a
+                href={`tel:${result.canonical_phone}`}
+                className="text-primary hover:underline"
+              >
+                📞 {result.canonical_phone}
+              </a>
+            ) : null}
+            {result.canonical_email ? (
+              <a
+                href={`mailto:${result.canonical_email}`}
+                className="text-primary hover:underline"
+              >
+                📧 {result.canonical_email}
+              </a>
+            ) : null}
+            {result.canonical_website ? (
+              <a
+                href={result.canonical_website}
+                target="_blank"
+                rel="noreferrer"
+                className="text-primary hover:underline"
+              >
+                🌐 website
+              </a>
+            ) : null}
+            {result.external_url ? (
+              <a
+                href={result.external_url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 rounded-full border border-border px-3 py-1 text-xs hover:bg-muted"
+              >
+                View on Airbnb ↗
+              </a>
+            ) : null}
+          </div>
         </div>
       </div>
-
-      <div className="mt-3 flex flex-wrap gap-4 text-xs">
-        {result.canonical_phone ? (
-          <a
-            href={`tel:${result.canonical_phone}`}
-            className="text-primary hover:underline"
-          >
-            📞 {result.canonical_phone}
-          </a>
-        ) : null}
-        {result.canonical_email ? (
-          <a
-            href={`mailto:${result.canonical_email}`}
-            className="text-primary hover:underline"
-          >
-            📧 {result.canonical_email}
-          </a>
-        ) : null}
-        {result.canonical_website ? (
-          <a
-            href={result.canonical_website}
-            target="_blank"
-            rel="noreferrer"
-            className="text-primary hover:underline"
-          >
-            🌐 website
-          </a>
-        ) : null}
-      </div>
     </li>
+  );
+}
+
+function Thumbnail({ src, alt }: { src: string | null; alt: string }) {
+  if (src) {
+    return (
+      <img
+        src={src}
+        alt={alt}
+        loading="lazy"
+        className="h-24 w-24 flex-shrink-0 rounded-md object-cover"
+      />
+    );
+  }
+  // Initials placeholder so the card layout doesn't shift between rows.
+  const initials = alt
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((w) => w[0]?.toUpperCase() ?? "")
+    .join("") || "?";
+  return (
+    <div className="flex h-24 w-24 flex-shrink-0 items-center justify-center rounded-md bg-muted text-base font-semibold text-muted-foreground">
+      {initials}
+    </div>
   );
 }

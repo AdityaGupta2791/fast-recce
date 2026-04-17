@@ -57,6 +57,13 @@ class SearchResultItem(BaseModel):
     sub_scores: list[SearchSubScore] = Field(default_factory=list)
     features: dict[str, Any] = Field(default_factory=dict)
 
+    # Surfaced separately so the frontend doesn't have to dig into features:
+    # - `primary_image_url` is the listing's hero photo (Airbnb-sourced rows)
+    # - `external_url` is the third-party listing URL (e.g. airbnb.com/rooms/<id>)
+    #   Google-Places-sourced rows leave both null and use `canonical_website`.
+    primary_image_url: str | None = None
+    external_url: str | None = None
+
 
 class SearchResponse(BaseModel):
     query: str
@@ -66,5 +73,7 @@ class SearchResponse(BaseModel):
     candidates_discovered: int
     candidates_new: int
     candidates_skipped_known: int
+    candidates_filtered_non_shoot: int = 0
+    airbnb_listings_scraped: int = 0
     duration_seconds: float
     errors: list[str] = Field(default_factory=list)

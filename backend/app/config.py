@@ -54,6 +54,19 @@ class Settings(BaseSettings):
     crawl_concurrency: int = 5
     crawl_timeout_seconds: int = 30
 
+    # --- Airbnb scraping (product pivot Part 2) ---
+    # Master kill switch. Default OFF; flip to true in `.env` only when
+    # deliberately testing. Plain HTTP → expect 20-50 requests before
+    # Airbnb rate-limits / blocks the IP.
+    airbnb_scrape_enabled: bool = False
+    # Minimum seconds between successive Airbnb listing fetches. Jitter of
+    # ±2s is added at runtime. 5s is a reasonable "polite" default — we
+    # are not simulating a human anymore, just not hammering.
+    airbnb_request_delay_seconds: float = 5.0
+    # Upper bound on listings fetched per user search. Keep small; every
+    # listing is one HTTP round-trip to Airbnb.
+    airbnb_max_listings_per_search: int = 10
+
     # --- Pipeline ---
     default_cities: list[str] = [
         "Mumbai",

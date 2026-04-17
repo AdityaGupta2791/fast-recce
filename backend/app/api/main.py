@@ -1,4 +1,9 @@
-"""FastAPI application factory. Mounts routers and exception handlers."""
+"""FastAPI application factory. Mounts routers and exception handlers.
+
+Note: `app/__init__.py` forces `WindowsProactorEventLoopPolicy` on Windows
+before this module loads. That's required for Playwright to launch
+Chromium — uvicorn's default SelectorEventLoop can't spawn subprocesses.
+"""
 
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator

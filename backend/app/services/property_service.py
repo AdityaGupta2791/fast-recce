@@ -7,12 +7,15 @@ Dedup is M6's concern — for now every candidate becomes a new property.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 from app.exceptions import ConflictError, NotFoundError, ValidationError
 from app.models.contact import DoNotContact, PropertyContact
@@ -33,9 +36,24 @@ class PropertyService:
         return prop
 
     async def find_by_google_place_id(self, place_id: str) -> Property | None:
-        stmt = select(Property).where(Property.google_place_id == place_id)
+        # Use ORDER BY + first() instead of scalar_one_or_none() so duplicate
+        # rows (data cruft from earlier failed ingest attempts; the column
+        # has no UNIQUE constraint yet) don't crash the upsert. Pick the
+        # oldest row deterministically and log a warning so we can clean
+        # the duplicates up later.
+        stmt = (
+            select(Property)
+            .where(Property.google_place_id == place_id)
+            .order_by(Property.created_at.asc())
+        )
         result = await self.db.execute(stmt)
-        return result.scalar_one_or_none()
+        rows = result.scalars().all()
+        if len(rows) > 1:
+            logger.warning(
+                "Duplicate properties for google_place_id=%s (count=%d, ids=%s)",
+                place_id, len(rows), [str(r.id) for r in rows],
+            )
+        return rows[0] if rows else None
 
     async def upsert_from_candidate(
         self, data: PropertyUpsertFromCandidate
@@ -114,12 +132,37 @@ class PropertyService:
 
     # --- Public search read (product pivot) ---
 
+    async def list_by_ids(
+        self,
+        ids: list[UUID],
+        *,
+        include_duplicates: bool = False,
+    ) -> list[Property]:
+        """Return properties with the given IDs, preserving caller order.
+
+        Used by `SearchService` to surface freshly-scraped Airbnb listings
+        whose `city` field (set from Airbnb's metadata) doesn't match the
+        user's free-text location hint — e.g. user typed "kandivali" but
+        Airbnb tagged the listing with `city="Mumbai"`. The fuzzy
+        location-hint search would never find them; loading by ID does.
+        """
+        if not ids:
+            return []
+        stmt = select(Property).where(Property.id.in_(ids))
+        if not include_duplicates:
+            stmt = stmt.where(Property.is_duplicate.is_(False))
+        rows = (await self.db.execute(stmt)).scalars().all()
+        # Re-order to match the input order (DB returns whatever).
+        by_id = {r.id: r for r in rows}
+        return [by_id[i] for i in ids if i in by_id]
+
     async def find_by_location_hint(
         self,
         *,
         city_hint: str,
         limit: int = 10,
         include_duplicates: bool = False,
+        property_types: list[str] | None = None,
     ) -> list[Property]:
         """Return non-duplicate properties whose location matches the hint.
 
@@ -127,6 +170,12 @@ class PropertyService:
         'Nagaon') to properties in the Alibaug district. Exact matching on
         `city` misses them. This method ALSO matches when the hint appears
         in `locality` or `canonical_name`. Ranked by relevance_score DESC.
+
+        `property_types` (optional): when provided, restrict results to
+        rows whose `property_type` is in the given set. Used by the public
+        search route so that e.g. a "property in kandivali" query (generic
+        route → residential intent) doesn't surface cached cafes/restaurants
+        from earlier "cafe in kandivali" searches.
         """
         pattern = f"%{city_hint.lower()}%"
         hint_filter = (
@@ -145,6 +194,8 @@ class PropertyService:
         )
         if not include_duplicates:
             stmt = stmt.where(Property.is_duplicate.is_(False))
+        if property_types:
+            stmt = stmt.where(Property.property_type.in_(property_types))
         rows = (await self.db.execute(stmt)).scalars().all()
         return list(rows)
 

@@ -254,6 +254,11 @@ export interface SearchResultItem {
   google_review_count: number | null;
   sub_scores: SearchSubScore[];
   features: Record<string, unknown>;
+  // Surfaced separately from `features` so the card doesn't have to dig.
+  // Airbnb-sourced rows populate both; Google-Places rows leave them null
+  // and use `canonical_website` for their actual site link.
+  primary_image_url: string | null;
+  external_url: string | null;
 }
 
 export interface SearchResponse {

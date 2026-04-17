@@ -79,4 +79,9 @@ export const analyticsApi = {
 export const searchApi = {
   search: (body: SearchRequest) =>
     http.post<SearchResponse>("/search", body).then((r) => r.data),
+  // Public, unauthenticated detail read — mirrors `propertiesApi.get` shape
+  // but routes through `/api/v1/search/property/<id>` so visitors don't get
+  // a 401 on the admin properties endpoint.
+  getProperty: (id: string) =>
+    http.get<PropertyDetail>(`/search/property/${id}`).then((r) => r.data),
 };

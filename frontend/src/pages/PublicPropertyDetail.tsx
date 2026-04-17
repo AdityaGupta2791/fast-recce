@@ -2,7 +2,7 @@ import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
 import { extractErrorMessage } from "@/api/client";
-import { propertiesApi } from "@/api/endpoints";
+import { searchApi } from "@/api/endpoints";
 import { ScoreBadge } from "@/components/ScoreBadge";
 import {
   ContactList,
@@ -16,7 +16,7 @@ export function PublicPropertyDetailPage() {
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["public-property", id],
-    queryFn: () => propertiesApi.get(id!),
+    queryFn: () => searchApi.getProperty(id!),
     enabled: Boolean(id),
   });
 

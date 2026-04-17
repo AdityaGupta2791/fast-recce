@@ -43,9 +43,49 @@ class AdHocDiscoveryResult:
     google_results_total: int
     candidates_created: int
     candidates_skipped_known: int
+    candidates_filtered_non_shoot: int
     new_candidates: list[DiscoveryCandidate]
     errors: list[str] = field(default_factory=list)
     duration_seconds: float = 0.0
+
+
+# Google-Places `types` that will NEVER be useful for shoot discovery.
+# These are dropped BEFORE calling Place Details (saves API cost).
+# The check is a set intersection against `PlaceSearchResult.types`; any hit
+# is enough to filter the candidate out.
+_GOOGLE_TYPE_BLOCKLIST: frozenset[str] = frozenset({
+    "real_estate_agency",
+    "lawyer",
+    "doctor",
+    "dentist",
+    "veterinary_care",
+    "hospital",
+    "pharmacy",
+    "car_dealer",
+    "car_repair",
+    "gas_station",
+    "bank",
+    "atm",
+    "supermarket",
+    "grocery_or_supermarket",
+    "gym",
+    "hardware_store",
+    "convenience_store",
+    "storage",
+    "insurance_agency",
+    "moving_company",
+    "funeral_home",
+    "plumber",
+    "electrician",
+    "post_office",
+    "police",
+    "fire_station",
+    "embassy",
+    "local_government_office",
+    "courthouse",
+    "travel_agency",
+})
+
 
 # Rough mapping from Google's place types to FastRecce property_type.
 # First match wins. Fallback to the query's property_type if nothing matches.
@@ -219,6 +259,7 @@ class DiscoveryService:
         new_candidates: list[DiscoveryCandidate] = []
         created = 0
         skipped_known = 0
+        filtered_non_shoot = 0
 
         try:
             results = await self.google.text_search(query_text)
@@ -228,6 +269,7 @@ class DiscoveryService:
                 google_results_total=0,
                 candidates_created=0,
                 candidates_skipped_known=0,
+                candidates_filtered_non_shoot=0,
                 new_candidates=[],
                 errors=errors,
                 duration_seconds=round(time.monotonic() - start, 3),
@@ -241,10 +283,24 @@ class DiscoveryService:
             if result.place_id in known_ids:
                 skipped_known += 1
                 continue
+
+            # Drop non-shoot businesses BEFORE the (paid) Place Details call.
+            # `result.types` usually already has enough signal — e.g.
+            # `real_estate_agency` on "Rudra Properties Nagpur".
+            if _is_non_shoot_type(result.types, result.primary_type):
+                filtered_non_shoot += 1
+                continue
+
             try:
                 details = await self.google.get_place_details(result.place_id)
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"get_place_details failed for {result.place_id}: {exc}")
+                continue
+
+            # Second-pass check — Place Details sometimes reveals types the
+            # Text Search result didn't include.
+            if _is_non_shoot_type(details.types, details.primary_type):
+                filtered_non_shoot += 1
                 continue
 
             payload = self._to_candidate(
@@ -273,6 +329,7 @@ class DiscoveryService:
             google_results_total=len(results),
             candidates_created=created,
             candidates_skipped_known=skipped_known,
+            candidates_filtered_non_shoot=filtered_non_shoot,
             new_candidates=new_candidates,
             errors=errors,
             duration_seconds=round(time.monotonic() - start, 3),
@@ -399,6 +456,20 @@ class DiscoveryService:
 
 
 # --- Module-private helpers ---
+
+
+def _is_non_shoot_type(
+    google_types: list[str], primary_type: str | None = None
+) -> bool:
+    """True if the Google place is clearly NOT a shoot-worthy venue.
+
+    Checks both the `types` array and `primary_type` against the blocklist.
+    A single match is enough — a "real_estate_agency" is never a shoot
+    location, even if it happens to also be tagged `establishment`.
+    """
+    if primary_type and primary_type in _GOOGLE_TYPE_BLOCKLIST:
+        return True
+    return any(t in _GOOGLE_TYPE_BLOCKLIST for t in google_types)
 
 
 def _infer_property_type(google_types: list[str], fallback: str) -> str:

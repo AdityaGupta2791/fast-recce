@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings, get_settings
 from app.database import get_db
 from app.exceptions import ForbiddenError, UnauthorizedError
+from app.integrations.airbnb_scraper import AirbnbScraper
+from app.integrations.duckduckgo import DuckDuckGoClient
 from app.integrations.google_places import GooglePlacesClient
 from app.integrations.llm import LLMClient
 from app.models.user import User
@@ -88,6 +90,16 @@ async def get_search_service(
         api_key=settings.gemini_api_key,
         model=settings.gemini_model,
     )
+    # Airbnb + DuckDuckGo are optional. The scraper is only constructed when
+    # the master env flag is on — otherwise residential / generic searches
+    # degrade gracefully to Google-Places-only (with a warning in `errors`).
+    airbnb_scraper: AirbnbScraper | None = None
+    duckduckgo_client: DuckDuckGoClient | None = None
+    if settings.airbnb_scrape_enabled:
+        airbnb_scraper = AirbnbScraper(
+            request_delay_seconds=settings.airbnb_request_delay_seconds,
+        )
+        duckduckgo_client = DuckDuckGoClient()
     try:
         async with google_client:
             property_service = PropertyService(db=db)
@@ -121,6 +133,9 @@ async def get_search_service(
                 property_service=property_service,
                 scoring_service=scoring_service,
                 briefing_service=briefing_service,
+                airbnb_scraper=airbnb_scraper,
+                duckduckgo_client=duckduckgo_client,
+                airbnb_max_listings_per_search=settings.airbnb_max_listings_per_search,
             )
     finally:
         await llm_client.close()
