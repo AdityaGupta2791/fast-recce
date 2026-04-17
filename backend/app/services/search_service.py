@@ -42,8 +42,13 @@ from app.services.discovery_service import DiscoveryService
 from app.services.property_service import PropertyService
 from app.services.scoring_service import ScoringService
 
+from app.integrations.external_listing_source import ScraperBlockedError
+
 if TYPE_CHECKING:
-    from app.integrations.airbnb_scraper import AirbnbListing, AirbnbScraper
+    from collections.abc import Awaitable, Callable
+
+    from app.integrations.external_listing import ExternalListing
+    from app.integrations.external_listing_source import ExternalListingSource
     from app.integrations.duckduckgo import DuckDuckGoClient
 
 logger = logging.getLogger(__name__)
@@ -62,6 +67,21 @@ _RESIDENTIAL_TYPES: frozenset[str] = frozenset({
     "villa", "bungalow", "farmhouse", "heritage_home",
 })
 
+# Source prefixes on `google_place_id` → human-readable label for the
+# "View on {label} ↗" pill in the UI. None for Google Places / legacy rows.
+_SOURCE_LABELS: dict[str, str] = {
+    "airbnb": "Airbnb",
+    "magicbricks": "MagicBricks",
+}
+
+# External sources whose public pages don't expose phone/email/website.
+# `_to_result_item` suppresses those fields for rows matching these
+# prefixes regardless of what's stored in the DB (avoids showing stale
+# cruft from older scraping eras).
+_SOURCES_WITHOUT_PUBLIC_CONTACTS: frozenset[str] = frozenset({
+    "airbnb", "magicbricks",
+})
+
 
 class SearchService:
     def __init__(
@@ -74,9 +94,11 @@ class SearchService:
         property_service: PropertyService,
         scoring_service: ScoringService,
         briefing_service: BriefingService,
-        airbnb_scraper: "AirbnbScraper | None" = None,
+        airbnb_scraper: "ExternalListingSource | None" = None,
+        magicbricks_scraper: "ExternalListingSource | None" = None,
         duckduckgo_client: "DuckDuckGoClient | None" = None,
         airbnb_max_listings_per_search: int = 10,
+        magicbricks_max_listings_per_search: int = 5,
     ) -> None:
         self.db = db
         self.discovery_service = discovery_service
@@ -87,8 +109,10 @@ class SearchService:
         self.scoring_service = scoring_service
         self.briefing_service = briefing_service
         self.airbnb_scraper = airbnb_scraper
+        self.magicbricks_scraper = magicbricks_scraper
         self.ddg_client = duckduckgo_client
         self.airbnb_max_listings = airbnb_max_listings_per_search
+        self.magicbricks_max_listings = magicbricks_max_listings_per_search
 
     async def search(self, request: SearchRequest) -> SearchResponse:
         start = time.monotonic()
@@ -113,28 +137,47 @@ class SearchService:
         candidates_skipped_known = 0
         candidates_filtered_non_shoot = 0
         airbnb_listings_scraped = 0
+        magicbricks_listings_scraped = 0
         fresh_ids: list[Any] = []  # IDs of properties just persisted in this request
 
         # 1. Dispatch to the right sources in parallel.
-        google_task = (
-            self._run_google_places_path(request, city_hint, property_type_hint)
-            if route in {"commercial", "residential"}
-            else None
-        )
-        airbnb_task = (
-            self._run_airbnb_path(request, location_hint)
-            if route in {"residential", "generic"}
-            else None
-        )
+        tasks: list[Any] = []
+        any_external_needed = route in {"residential", "generic"}
 
-        if google_task is None and airbnb_task is None:
-            # Should be unreachable — _classify_route always returns one of
-            # the three known buckets. Defensive fallthrough anyway.
-            google_task = self._run_google_places_path(
-                request, city_hint, property_type_hint
+        if route in {"commercial", "residential"}:
+            tasks.append(
+                self._run_google_places_path(request, city_hint, property_type_hint)
             )
 
-        tasks = [t for t in (google_task, airbnb_task) if t is not None]
+        # External-listing sources (Airbnb, MagicBricks) fire for residential
+        # + generic routes. Each is gated on its own feature flag via a
+        # non-None scraper injection.
+        if any_external_needed and self.ddg_client is not None:
+            if self.airbnb_scraper is not None:
+                tasks.append(
+                    self._run_external_source_path(
+                        request, location_hint,
+                        source=self.airbnb_scraper,
+                        url_finder=self.ddg_client.find_airbnb_listing_urls,
+                        max_listings=self.airbnb_max_listings,
+                    )
+                )
+            if self.magicbricks_scraper is not None:
+                tasks.append(
+                    self._run_external_source_path(
+                        request, location_hint,
+                        source=self.magicbricks_scraper,
+                        url_finder=self.ddg_client.find_magicbricks_listing_urls,
+                        max_listings=self.magicbricks_max_listings,
+                    )
+                )
+
+        if not tasks:
+            # Unreachable via `_classify_route` in practice. Defensive.
+            tasks.append(
+                self._run_google_places_path(request, city_hint, property_type_hint)
+            )
+
         outcomes = await asyncio.gather(*tasks, return_exceptions=True)
 
         for outcome in outcomes:
@@ -145,19 +188,31 @@ class SearchService:
             candidates_new += outcome["candidates_new"]
             candidates_skipped_known += outcome["candidates_skipped_known"]
             candidates_filtered_non_shoot += outcome["candidates_filtered_non_shoot"]
-            airbnb_listings_scraped += outcome["airbnb_listings_scraped"]
+            # Per-source bucket (external paths set `source_id` + `listings_scraped`).
+            src = outcome.get("source_id")
+            scraped = outcome.get("listings_scraped", 0)
+            if src == "airbnb":
+                airbnb_listings_scraped += scraped
+            elif src == "magicbricks":
+                magicbricks_listings_scraped += scraped
             errors.extend(outcome["errors"])
             fresh_ids.extend(outcome.get("ingested_ids") or [])
 
-        # If the router wanted Airbnb but the scraper wasn't configured,
-        # surface a clear warning so the UX explains why results are thin.
-        if airbnb_task is not None and (
-            self.airbnb_scraper is None or self.ddg_client is None
+        # Warn when the route wanted external sources but none were configured.
+        if any_external_needed and self.ddg_client is None:
+            errors.append(
+                "External-listing scrapers are disabled. Residential / generic "
+                "queries only surface Google Places results. Set "
+                "AIRBNB_SCRAPE_ENABLED=true (and/or MAGICBRICKS_SCRAPE_ENABLED=true) "
+                "to enable them."
+            )
+        elif any_external_needed and (
+            self.airbnb_scraper is None and self.magicbricks_scraper is None
         ):
             errors.append(
-                "Airbnb scraping is disabled. Residential / generic queries "
-                "only return results Google Places could find. Set "
-                "AIRBNB_SCRAPE_ENABLED=true to enable the Airbnb path."
+                "No external-listing scrapers are enabled. Flip "
+                "AIRBNB_SCRAPE_ENABLED or MAGICBRICKS_SCRAPE_ENABLED in .env "
+                "to broaden residential / generic results."
             )
 
         # 2. Load ranked results. Two sources merged:
@@ -218,6 +273,7 @@ class SearchService:
             candidates_skipped_known=candidates_skipped_known,
             candidates_filtered_non_shoot=candidates_filtered_non_shoot,
             airbnb_listings_scraped=airbnb_listings_scraped,
+            magicbricks_listings_scraped=magicbricks_listings_scraped,
             duration_seconds=round(time.monotonic() - start, 3),
             errors=errors,
         )
@@ -257,81 +313,89 @@ class SearchService:
             "candidates_new": discovery.candidates_created,
             "candidates_skipped_known": discovery.candidates_skipped_known,
             "candidates_filtered_non_shoot": discovery.candidates_filtered_non_shoot,
-            "airbnb_listings_scraped": 0,
+            "source_id": None,
+            "listings_scraped": 0,
             "errors": errors,
             "ingested_ids": ingested_ids,
         }
 
-    async def _run_airbnb_path(
+    async def _run_external_source_path(
         self,
         request: SearchRequest,
         location_hint: str,
+        source: "ExternalListingSource",
+        url_finder: "Callable[..., Awaitable[list[str]]]",
+        max_listings: int,
     ) -> dict[str, Any]:
-        """Airbnb → enrichment chain → ingest."""
-        if self.airbnb_scraper is None or self.ddg_client is None:
-            # Scraper disabled — main path already surfaces the warning.
-            return _zero_path_outcome([])
+        """Generic: DDG for listing URLs → scrape each → persist.
 
+        Works for any source that conforms to `ExternalListingSource`
+        (Airbnb, MagicBricks, future sources). The `url_finder` callable
+        is the DDG method for that source (`find_airbnb_listing_urls`,
+        `find_magicbricks_listing_urls`, ...). Called with `(query, limit=)`.
+        """
+        label = source.source_label
         errors: list[str] = []
 
-        # Step 1: DDG → Airbnb listing URLs.
+        # Step 1: DDG → listing URLs for this source.
         try:
-            urls = await self.ddg_client.find_airbnb_listing_urls(
-                request.query, limit=self.airbnb_max_listings
-            )
+            urls = await url_finder(request.query, limit=max_listings)
         except Exception as exc:  # noqa: BLE001
-            return _zero_path_outcome([f"DuckDuckGo Airbnb search failed: {exc}"])
+            return _zero_path_outcome(
+                [f"DuckDuckGo {label} search failed: {exc}"],
+                source_id=source.source_id,
+            )
 
         if not urls:
-            return _zero_path_outcome([])
+            return _zero_path_outcome([], source_id=source.source_id)
 
-        listings: list[Any] = []  # List[AirbnbListing] — avoid import at runtime
-        # Early-abort guard: if 2 listings in a row come back blocked
-        # (None = delisted / CAPTCHA / 403 / parse fail), stop scraping.
-        # Continuing would deepen the IP-level rate-limit on actual bans.
-        # Delisted listings are common and harmless — they trip the counter
-        # too, but a search where most URLs are delisted is also pointless.
+        listings: list[Any] = []  # List[ExternalListing] — avoid runtime import
+        # Early-abort guard: only HARD blocks count (403/429/5xx/CAPTCHA —
+        # the scraper raises ScraperBlockedError in those cases). Soft
+        # skips (410 Gone, 404, parse-miss — scraper returns None) are
+        # common with stale DDG indexes and harmless; they MUST NOT abort
+        # the batch or we'd miss live listings further down the list.
         consecutive_blocks = 0
         block_threshold = 3
-        async with self.airbnb_scraper as scraper:
+        async with source as scraper:
             for url in urls:
                 try:
                     listing = await scraper.scrape_listing(url)
-                except Exception as exc:  # noqa: BLE001
-                    errors.append(f"Airbnb scrape failed for {url}: {exc}")
+                except ScraperBlockedError as exc:
+                    errors.append(f"{label} blocked: {exc}")
                     consecutive_blocks += 1
+                except Exception as exc:  # noqa: BLE001
+                    # Unexpected error — log as a skip but don't count
+                    # toward abort (we don't know if it's IP-level).
+                    errors.append(f"{label} scrape failed for {url}: {exc}")
                 else:
                     if listing is None:
-                        # Most common cause: listing delisted / made private —
-                        # Airbnb returned 200-OK with `errorData` set. Could
-                        # also be a CAPTCHA wall (rarer); the backend log
-                        # warning shows which.
                         errors.append(
-                            f"Airbnb listing skipped (delisted / unavailable): {url}"
+                            f"{label} listing skipped (delisted / unavailable): {url}"
                         )
-                        consecutive_blocks += 1
+                        # soft skip — do NOT increment consecutive_blocks
                     else:
                         listings.append(listing)
                         consecutive_blocks = 0
 
                 if consecutive_blocks >= block_threshold:
                     errors.append(
-                        f"Stopped after {consecutive_blocks} consecutive Airbnb "
-                        "skips. If this happens repeatedly, the IP may be rate-"
+                        f"Stopped {label} after {consecutive_blocks} consecutive "
+                        "hard blocks (403 / 429 / CAPTCHA). IP is likely rate-"
                         "limited — try again in a few hours."
                     )
                     break
 
-        # Step 2: for each listing, persist as a Property row.
+        # Step 2: persist each scraped listing.
         ingested_ids: list[Any] = []
         for listing in listings:
             try:
-                prop_id = await self._ingest_airbnb_listing(listing, location_hint)
+                prop_id = await self._ingest_external_listing(listing, location_hint)
                 if prop_id is not None:
                     ingested_ids.append(prop_id)
             except Exception as exc:  # noqa: BLE001
                 errors.append(
-                    f"Airbnb ingest failed for listing {listing.listing_id}: {exc}"
+                    f"{label} ingest failed for listing {listing.listing_id}: {exc}"
                 )
 
         return {
@@ -339,66 +403,74 @@ class SearchService:
             "candidates_new": len(listings),
             "candidates_skipped_known": 0,
             "candidates_filtered_non_shoot": 0,
-            "airbnb_listings_scraped": len(listings),
+            "source_id": source.source_id,
+            "listings_scraped": len(listings),
             "errors": errors,
             "ingested_ids": ingested_ids,
         }
 
-    async def _ingest_airbnb_listing(
+    async def _ingest_external_listing(
         self,
-        listing: "AirbnbListing",
+        listing: "ExternalListing",
         location_hint: str,
-    ) -> Any:  # returns the persisted Property.id (UUID) — Any to avoid extra import here
-        """Persist a scraped Airbnb listing as a Property row.
+    ) -> Any:  # returns the persisted Property.id (UUID)
+        """Persist a scraped external listing as a Property row.
 
-        Part 3 dropped the chained DDG→villa-site→CrawlerService enrichment.
-        We persist exactly what Airbnb gives us — title, location, image
-        gallery, and the canonical listing URL — so the user can click
-        through and inquire via Airbnb's own messaging. Phone / email stay
-        null for Airbnb-sourced rows; that's intentional.
+        Works for any `ExternalListing` regardless of source — Airbnb,
+        MagicBricks, etc. Phone/email stay null for these rows (all
+        current sources hide contacts behind OTP); the UI suppresses
+        those fields at the response layer. Users click through the
+        "View on {source_label} ↗" pill to inquire via the platform.
+
+        The `google_place_id` column doubles as a generic external ID with
+        a source prefix: `airbnb:<id>`, `magicbricks:<id>`. Tech debt;
+        a proper `external_source` / `external_id` split is planned.
         """
-        # Airbnb tags listings with the parent city ("Mumbai") and rarely
+        # Sources tag listings with the parent city ("Mumbai") and rarely
         # the neighborhood. If the user typed a more specific hint
-        # ("kandivali") and Airbnb didn't already give us a neighborhood,
-        # preserve the user's intent in `locality` so future searches for
-        # that hint can find this row.
-        airbnb_city = (listing.city_hint or "").strip()
-        derived_locality = listing.neighborhood
+        # ("kandivali") and the scraper didn't already give us a
+        # neighborhood/locality, preserve the user's intent in `locality`
+        # so future searches for that hint can find this row.
+        source_city = (listing.city_hint or "").strip()
+        derived_locality = listing.locality or listing.neighborhood
         if not derived_locality and location_hint:
             hint = location_hint.strip()
-            if hint and hint.lower() != airbnb_city.lower():
+            if hint and hint.lower() != source_city.lower():
                 derived_locality = hint.title()
+
+        host_first_name = getattr(listing, "host_first_name", None)
 
         payload = PropertyUpsertFromCandidate(
             candidate_id=uuid.uuid4(),  # ephemeral; no candidate row
-            canonical_name=listing.title or "Airbnb Listing",
-            city=airbnb_city or location_hint or "Unknown",
+            canonical_name=listing.title or f"{listing.source.title()} Listing",
+            city=source_city or location_hint or "Unknown",
             locality=derived_locality,
             lat=None,
             lng=None,
-            property_type="villa",  # Airbnb listings are almost always residential
-            # `google_place_id` doubles as a generic external ID — the
-            # `airbnb:<id>` prefix guarantees no collision with real Google
-            # place_ids (which start with `ChIJ`). Tech debt; planned cleanup.
-            google_place_id=f"airbnb:{listing.listing_id}",
+            property_type="villa",  # external sources are almost always residential
+            google_place_id=f"{listing.source}:{listing.listing_id}",
             google_rating=None,
             google_review_count=None,
-            website=None,  # Airbnb listing URL goes in features_json.airbnb_url
+            website=None,  # listing URL goes in features_json.external_url
             features_json={
                 "amenities": list(listing.amenities or []),
                 "feature_tags": [],
                 "description": listing.description,
-                "source": "airbnb",
-                "airbnb_url": listing.url,
+                "source": listing.source,
+                # `external_url` is the generic key the `_to_result_item`
+                # projection reads from (back-compat alias `airbnb_url`
+                # written too so older rows keep rendering).
+                "external_url": listing.url,
+                "airbnb_url": listing.url if listing.source == "airbnb" else None,
                 "primary_image_url": listing.primary_image_url,
                 "image_urls": list(listing.image_urls or []),
-                "airbnb_host_first_name": listing.host_first_name,
+                "airbnb_host_first_name": host_first_name,
             },
         )
         prop = await self.property_service.upsert_from_candidate(payload)
 
         # Score + brief still run — both have heuristic fallbacks so even a
-        # thin Airbnb payload (title + city only) produces something useful.
+        # thin external payload (title + city only) produces something useful.
         try:
             await self.scoring_service.score_property(prop.id)
         except Exception:  # noqa: BLE001
@@ -494,20 +566,29 @@ class SearchService:
 
         features = row.features_json or {}
         primary_image_url = features.get("primary_image_url")
-        # Airbnb listings stash their canonical URL here; Google-Places rows
-        # leave this null and use `canonical_website` for their actual site.
-        external_url = features.get("airbnb_url")
+        # External-listing rows stash their canonical URL here. Prefer the
+        # generic `external_url` key (written for newer MagicBricks + Airbnb
+        # rows) with a back-compat fallback to `airbnb_url` for rows
+        # persisted before the rename. Google-Places rows leave both null
+        # and use `canonical_website` for their actual site.
+        external_url = features.get("external_url") or features.get("airbnb_url")
 
-        # Airbnb-sourced rows must NEVER show phone/email/website. Airbnb
-        # itself doesn't expose those fields publicly — anything in the DB
-        # is leftover from earlier scraping eras (Part 2's villa-website
-        # chain) or accidental dedup merges with a Google row. Showing
-        # them on an Airbnb card is misleading; users should inquire via
-        # the "View on Airbnb" CTA instead.
-        is_airbnb_sourced = (row.google_place_id or "").startswith("airbnb:")
-        canonical_phone = None if is_airbnb_sourced else row.canonical_phone
-        canonical_email = None if is_airbnb_sourced else row.canonical_email
-        canonical_website = None if is_airbnb_sourced else row.canonical_website
+        # Source prefix on google_place_id is the single discriminator:
+        # "airbnb:<id>"      → Airbnb listing
+        # "magicbricks:<id>" → MagicBricks listing
+        # anything else / None → Google Places or legacy
+        source_prefix = (row.google_place_id or "").split(":", 1)[0]
+        source_label = _SOURCE_LABELS.get(source_prefix)
+
+        # External-source rows must NEVER show phone/email/website. Public
+        # pages on Airbnb / MagicBricks hide contacts behind OTP gates —
+        # any value in these columns is leftover cruft (Part 2's villa-
+        # website chain, accidental dedup merges). Users inquire via the
+        # "View on {source_label} ↗" pill instead.
+        is_external_source = source_prefix in _SOURCES_WITHOUT_PUBLIC_CONTACTS
+        canonical_phone = None if is_external_source else row.canonical_phone
+        canonical_email = None if is_external_source else row.canonical_email
+        canonical_website = None if is_external_source else row.canonical_website
 
         return SearchResultItem(
             id=row.id,
@@ -526,6 +607,7 @@ class SearchService:
             features=features,
             primary_image_url=primary_image_url if isinstance(primary_image_url, str) else None,
             external_url=external_url if isinstance(external_url, str) else None,
+            source_label=source_label,
         )
 
 
@@ -693,14 +775,24 @@ def _classify_route(property_type_hint: str | None) -> str:
     return "generic"
 
 
-def _zero_path_outcome(errors: list[str]) -> dict[str, Any]:
-    """Standard empty-stats dict used when a source path short-circuits."""
+def _zero_path_outcome(
+    errors: list[str],
+    *,
+    source_id: str | None = None,
+) -> dict[str, Any]:
+    """Standard empty-stats dict used when a source path short-circuits.
+
+    `source_id` is set for external-listing paths so the aggregator in
+    `search()` can tell which per-source counter to increment (even
+    though the count is zero).
+    """
     return {
         "candidates_discovered": 0,
         "candidates_new": 0,
         "candidates_skipped_known": 0,
         "candidates_filtered_non_shoot": 0,
-        "airbnb_listings_scraped": 0,
+        "source_id": source_id,
+        "listings_scraped": 0,
         "errors": errors,
         "ingested_ids": [],
     }

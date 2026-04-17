@@ -111,9 +111,15 @@ class FakeCrawlerService:
 
 
 class FakeDDG:
-    def __init__(self, airbnb_urls: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        airbnb_urls: list[str] | None = None,
+        magicbricks_urls: list[str] | None = None,
+    ) -> None:
         self.airbnb_urls = airbnb_urls or []
+        self.magicbricks_urls = magicbricks_urls or []
         self.find_airbnb_calls: list[str] = []
+        self.find_magicbricks_calls: list[str] = []
 
     async def find_airbnb_listing_urls(
         self, query: str, *, limit: int = 10
@@ -121,8 +127,18 @@ class FakeDDG:
         self.find_airbnb_calls.append(query)
         return self.airbnb_urls[:limit]
 
+    async def find_magicbricks_listing_urls(
+        self, query: str, *, limit: int = 10
+    ) -> list[str]:
+        self.find_magicbricks_calls.append(query)
+        return self.magicbricks_urls[:limit]
+
 
 class FakeAirbnbScraper:
+    source_id = "airbnb"
+    source_label = "Airbnb"
+    exposes_contacts = False
+
     def __init__(self, listings_by_url: dict[str, AirbnbListing]) -> None:
         self.listings_by_url = listings_by_url
         self.scrape_calls: list[str] = []
@@ -137,6 +153,31 @@ class FakeAirbnbScraper:
         self.exited += 1
 
     async def scrape_listing(self, url: str) -> AirbnbListing | None:
+        self.scrape_calls.append(url)
+        return self.listings_by_url.get(url)
+
+
+class FakeMagicBricksScraper:
+    """Minimal MagicBricks stand-in. Returns pre-canned MagicBricksListing
+    objects keyed by URL so tests can assert per-URL scrape calls."""
+    source_id = "magicbricks"
+    source_label = "MagicBricks"
+    exposes_contacts = False
+
+    def __init__(self, listings_by_url: dict[str, Any]) -> None:
+        self.listings_by_url = listings_by_url
+        self.scrape_calls: list[str] = []
+        self.entered = 0
+        self.exited = 0
+
+    async def __aenter__(self) -> "FakeMagicBricksScraper":
+        self.entered += 1
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> None:
+        self.exited += 1
+
+    async def scrape_listing(self, url: str) -> Any:
         self.scrape_calls.append(url)
         return self.listings_by_url.get(url)
 
@@ -206,11 +247,25 @@ def _airbnb_listing(listing_id: str, title: str, city_hint: str = "Alibaug") -> 
     )
 
 
+def _mb_listing(listing_id: str, title: str, city_hint: str = "Alibaug") -> Any:
+    from app.integrations.magicbricks_scraper import MagicBricksListing
+    return MagicBricksListing(
+        listing_id=listing_id,
+        url=f"https://www.magicbricks.com/propertyDetails/x&id={listing_id}",
+        title=title,
+        description="Nice MB villa",
+        city_hint=city_hint,
+        locality="Kihim",
+        amenities=["Parking", "Flooring"],
+    )
+
+
 def _make_service(
     db: AsyncSession,
     google: FakeGoogleClient,
     *,
     airbnb_scraper: FakeAirbnbScraper | None = None,
+    magicbricks_scraper: FakeMagicBricksScraper | None = None,
     ddg: FakeDDG | None = None,
 ) -> SearchService:
     property_service = PropertyService(db=db)
@@ -242,8 +297,10 @@ def _make_service(
             contact_service=contact_service,
         ),
         airbnb_scraper=airbnb_scraper,  # type: ignore[arg-type]
+        magicbricks_scraper=magicbricks_scraper,  # type: ignore[arg-type]
         duckduckgo_client=ddg,  # type: ignore[arg-type]
         airbnb_max_listings_per_search=5,
+        magicbricks_max_listings_per_search=5,
     )
 
 
@@ -251,7 +308,7 @@ def _make_service(
 
 
 async def test_router_commercial_skips_airbnb(db_session: AsyncSession) -> None:
-    """'resorts in Alibaug' → property_type=resort → Google only, no Airbnb call."""
+    """'resorts in Alibaug' → property_type=resort → Google only, no external sources."""
     await _seed_google_source(db_session)
     google = FakeGoogleClient(
         search_responses={"resorts in Alibaug": [_place_search("p_1", "Ocean Resort")]},
@@ -259,64 +316,112 @@ async def test_router_commercial_skips_airbnb(db_session: AsyncSession) -> None:
     )
     ddg = FakeDDG(airbnb_urls=["https://www.airbnb.com/rooms/42"])
     scraper = FakeAirbnbScraper(listings_by_url={})
+    mb = FakeMagicBricksScraper(listings_by_url={})
 
-    service = _make_service(db_session, google, airbnb_scraper=scraper, ddg=ddg)
+    service = _make_service(
+        db_session, google, airbnb_scraper=scraper,
+        magicbricks_scraper=mb, ddg=ddg,
+    )
     resp = await service.search(SearchRequest(query="resorts in Alibaug"))
 
     assert resp.inferred_property_type == "resort"
     assert google.text_search_calls == ["resorts in Alibaug"]
-    # Airbnb side was never triggered for a commercial query.
+    # No external source was triggered for a commercial query.
     assert ddg.find_airbnb_calls == []
+    assert ddg.find_magicbricks_calls == []
     assert scraper.scrape_calls == []
+    assert mb.scrape_calls == []
     assert scraper.entered == 0
+    assert mb.entered == 0
 
 
-async def test_router_residential_fires_both_in_parallel(
+async def test_router_residential_fires_all_sources_in_parallel(
     db_session: AsyncSession,
 ) -> None:
-    """'villa in Alibaug' → both Google and Airbnb paths run."""
+    """'villa in Alibaug' → Google + Airbnb + MagicBricks all fire."""
     await _seed_google_source(db_session)
     google = FakeGoogleClient(
         search_responses={"villa in Alibaug": [_place_search("p_g", "Google Villa")]},
         details_by_id={"p_g": _place_details("p_g", "Google Villa")},
     )
     airbnb_url = "https://www.airbnb.com/rooms/42"
-    ddg = FakeDDG(airbnb_urls=[airbnb_url])
+    mb_url = "https://www.magicbricks.com/propertyDetails/x&id=abc"
+    ddg = FakeDDG(airbnb_urls=[airbnb_url], magicbricks_urls=[mb_url])
     scraper = FakeAirbnbScraper(
         listings_by_url={airbnb_url: _airbnb_listing("42", "Airbnb Villa")},
     )
+    mb = FakeMagicBricksScraper(
+        listings_by_url={mb_url: _mb_listing("abc", "MB Villa")},
+    )
 
-    service = _make_service(db_session, google, airbnb_scraper=scraper, ddg=ddg)
+    service = _make_service(
+        db_session, google,
+        airbnb_scraper=scraper, magicbricks_scraper=mb, ddg=ddg,
+    )
     resp = await service.search(SearchRequest(query="villa in Alibaug"))
 
     assert resp.inferred_property_type == "villa"
     assert google.text_search_calls == ["villa in Alibaug"]
     assert ddg.find_airbnb_calls == ["villa in Alibaug"]
+    assert ddg.find_magicbricks_calls == ["villa in Alibaug"]
     assert scraper.scrape_calls == [airbnb_url]
-    # Part 3 dropped the villa-website enrichment chain — DDG is only used
-    # for finding Airbnb listing URLs now.
+    assert mb.scrape_calls == [mb_url]
     assert resp.airbnb_listings_scraped == 1
+    assert resp.magicbricks_listings_scraped == 1
 
 
-async def test_router_generic_skips_google(db_session: AsyncSession) -> None:
-    """'property in Karjat' → no type match → Airbnb only, Google skipped."""
+async def test_router_generic_skips_google_fires_external(db_session: AsyncSession) -> None:
+    """'property in Karjat' → no type match → Airbnb + MB only, Google skipped."""
     await _seed_google_source(db_session)
     google = FakeGoogleClient()  # should never be called
     airbnb_url = "https://www.airbnb.com/rooms/99"
-    ddg = FakeDDG(airbnb_urls=[airbnb_url])
+    mb_url = "https://www.magicbricks.com/propertyDetails/x&id=def"
+    ddg = FakeDDG(airbnb_urls=[airbnb_url], magicbricks_urls=[mb_url])
     scraper = FakeAirbnbScraper(
         listings_by_url={airbnb_url: _airbnb_listing("99", "Karjat Home", "Karjat")},
     )
+    mb = FakeMagicBricksScraper(
+        listings_by_url={mb_url: _mb_listing("def", "MB Karjat Home", "Karjat")},
+    )
 
-    service = _make_service(db_session, google, airbnb_scraper=scraper, ddg=ddg)
+    service = _make_service(
+        db_session, google,
+        airbnb_scraper=scraper, magicbricks_scraper=mb, ddg=ddg,
+    )
     resp = await service.search(SearchRequest(query="property in Karjat"))
 
     assert resp.inferred_property_type == "other"
-    # Google was NOT hit.
     assert google.text_search_calls == []
-    # Airbnb path ran.
     assert ddg.find_airbnb_calls == ["property in Karjat"]
+    assert ddg.find_magicbricks_calls == ["property in Karjat"]
     assert scraper.scrape_calls == [airbnb_url]
+    assert mb.scrape_calls == [mb_url]
+
+
+async def test_magicbricks_runs_when_airbnb_disabled(db_session: AsyncSession) -> None:
+    """If only MagicBricks is enabled, residential/generic searches still run MB.
+    The router doesn't require Airbnb to be present."""
+    await _seed_google_source(db_session)
+    google = FakeGoogleClient(
+        search_responses={"villa in Alibaug": [_place_search("p_g", "Google Villa")]},
+        details_by_id={"p_g": _place_details("p_g", "Google Villa")},
+    )
+    mb_url = "https://www.magicbricks.com/propertyDetails/x&id=solo"
+    ddg = FakeDDG(magicbricks_urls=[mb_url])
+    mb = FakeMagicBricksScraper(
+        listings_by_url={mb_url: _mb_listing("solo", "MB Solo Villa")},
+    )
+
+    service = _make_service(
+        db_session, google,
+        airbnb_scraper=None, magicbricks_scraper=mb, ddg=ddg,
+    )
+    resp = await service.search(SearchRequest(query="villa in Alibaug"))
+
+    assert resp.airbnb_listings_scraped == 0
+    assert resp.magicbricks_listings_scraped == 1
+    assert mb.scrape_calls == [mb_url]
+    assert ddg.find_airbnb_calls == []
 
 
 async def test_search_degrades_gracefully_when_airbnb_disabled(

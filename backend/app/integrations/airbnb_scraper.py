@@ -38,10 +38,13 @@ import logging
 import random
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+from app.integrations.external_listing import ExternalListing
+from app.integrations.external_listing_source import ScraperBlockedError
 
 logger = logging.getLogger(__name__)
 
@@ -97,23 +100,18 @@ _JSON_BLOB_RE = re.compile(
 _LISTING_ID_RE = re.compile(r"/rooms/(?:plus/)?(\d+)")
 
 
-@dataclass
-class AirbnbListing:
-    listing_id: str
-    url: str
-    title: str
-    description: str | None = None
-    neighborhood: str | None = None
-    city_hint: str | None = None
-    amenities: list[str] = field(default_factory=list)
+@dataclass(kw_only=True)
+class AirbnbListing(ExternalListing):
+    """Airbnb-specific listing.
+
+    Inherits the source-agnostic fields (listing_id, url, title, city_hint,
+    image_urls, ...) from `ExternalListing` and adds a couple of Airbnb-
+    only extras. `source` defaults to "airbnb" so existing construction
+    sites / tests that don't pass it still work.
+    """
+    source: str = "airbnb"
     host_first_name: str | None = None
     price_per_night: str | None = None
-    primary_image_url: str | None = None
-    # Full image gallery (deduped, capped). primary_image_url is gallery[0]
-    # when this list is non-empty.
-    image_urls: list[str] = field(default_factory=list)
-    # Kept for drift-detection when field paths change.
-    raw_json_top_keys: list[str] = field(default_factory=list)
 
 
 class AirbnbScraper:
@@ -123,13 +121,17 @@ class AirbnbScraper:
     `__NEXT_DATA__` JSON blob out of the returned HTML, and extracts
     structured fields. No Chromium, no subprocess, no visible window.
 
-    Kept `__aenter__` / `__aexit__` interface so `SearchService` can use
-    it the same way it used the Playwright variant.
+    Conforms to `ExternalListingSource` (see external_listing_source.py).
 
     Usage:
         async with AirbnbScraper() as scraper:
             listing = await scraper.scrape_listing(url)
     """
+
+    # --- ExternalListingSource protocol ---
+    source_id: str = "airbnb"
+    source_label: str = "Airbnb"
+    exposes_contacts: bool = False
 
     def __init__(
         self,
@@ -183,18 +185,20 @@ class AirbnbScraper:
             logger.warning("Airbnb GET failed for %s: %s", url, exc)
             return None
 
+        # HARD BLOCK — raise so the source router counts it toward its
+        # early-abort threshold. Real "stop hammering" signals.
         if resp.status_code in (403, 429) or resp.status_code >= 500:
             logger.warning(
-                "Airbnb status %s for %s — likely rate-limited or banned",
+                "Airbnb blocked us: status %s for %s",
                 resp.status_code, url,
             )
-            return None
+            raise ScraperBlockedError(f"Airbnb returned {resp.status_code}")
 
         html = resp.text
         lower_html = html.lower()
         if any(indicator in lower_html for indicator in _BLOCK_INDICATORS):
             logger.warning("Airbnb CAPTCHA / block wall detected for %s", url)
-            return None
+            raise ScraperBlockedError(f"Airbnb CAPTCHA wall for {url}")
 
         raw_json = _extract_json_blob(html)
         if raw_json is None:
@@ -225,7 +229,7 @@ class AirbnbScraper:
         return AirbnbListing(
             listing_id=listing_id,
             url=url,
-            raw_json_top_keys=sorted(data.keys()) if isinstance(data, dict) else [],
+            raw_top_keys=sorted(data.keys()) if isinstance(data, dict) else [],
             **fields,
         )
 

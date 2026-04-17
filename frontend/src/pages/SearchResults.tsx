@@ -231,7 +231,7 @@ function ResultCard({ result }: { result: SearchResultItem }) {
                 rel="noreferrer"
                 className="inline-flex items-center gap-1 rounded-full border border-border px-3 py-1 text-xs hover:bg-muted"
               >
-                View on Airbnb ↗
+                View on {result.source_label ?? "listing"} ↗
               </a>
             ) : null}
           </div>

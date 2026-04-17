@@ -1,13 +1,17 @@
 """DuckDuckGo search client — used by the public search pipeline.
 
-Single job: find Airbnb listing URLs for a free-text query. We can't hit
-Airbnb's own search (bot-protected) but Google/DDG have already indexed
-Airbnb listings. Used by the source router's residential / generic paths.
+Finds third-party listing URLs for a free-text query. We can't hit each
+site's own search (bot-protected) but Google/DDG have already indexed
+them. Used by the source router's residential / generic paths.
 
-(Part 3 removed the chained `find_property_website` step — Airbnb listings
-are now surfaced as discovery-only with a "View on Airbnb" CTA. Filmmakers
-inquire via Airbnb's own messaging instead of us scraping a villa's own
-website for phone/email.)
+Supported sources (one helper each):
+  - Airbnb           → find_airbnb_listing_urls
+  - MagicBricks      → find_magicbricks_listing_urls
+
+(Part 3 removed the chained `find_property_website` step — these listings
+are surfaced as discovery-only with a "View on {source} ↗" CTA. Users
+inquire via each platform's own messaging instead of us scraping phone/
+email from a villa's own website.)
 
 Why DuckDuckGo and not Google:
   - Google HTML scraping triggers CAPTCHA under minor load.
@@ -37,6 +41,16 @@ logger = logging.getLogger(__name__)
 # often serves those first; we canonicalize to www.airbnb.com downstream.
 _AIRBNB_LISTING_URL_RE = re.compile(
     r"^https?://(?:[a-z0-9-]+\.)?airbnb\.[a-z.]{2,6}/rooms/(?:plus/)?(?P<id>\d+)",
+    re.IGNORECASE,
+)
+
+# MagicBricks listing URLs look like:
+#   https://www.magicbricks.com/propertyDetails/<slug>&id=<hex>
+#   https://www.magicbricks.com/mbldp/propertyDetails/<slug>&id=<hex>
+# We use the hex `id` as the stable listing ID in the Property table.
+_MAGICBRICKS_LISTING_URL_RE = re.compile(
+    r"^https?://(?:www\.)?magicbricks\.com/(?:mbldp/)?propertyDetails/"
+    r".+?[?&]id=(?P<id>[0-9a-fA-F]{8,})",
     re.IGNORECASE,
 )
 
@@ -83,6 +97,38 @@ class DuckDuckGoClient:
             # Canonicalize to strip query/hash.
             canonical = _canonical_airbnb_url(listing_id)
             urls.append(canonical)
+            if len(urls) >= limit:
+                break
+        return urls
+
+    async def find_magicbricks_listing_urls(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+    ) -> list[str]:
+        """Return up to `limit` deduplicated MagicBricks listing URLs.
+
+        Uses `site:magicbricks.com/propertyDetails` — the `/propertyDetails`
+        path prefix biases DDG toward individual listings rather than
+        category/search pages.
+        """
+        full_query = f"site:magicbricks.com/propertyDetails {query}"
+        results = await self._search(full_query, max_results=limit * 3)
+
+        urls: list[str] = []
+        seen_listing_ids: set[str] = set()
+        for r in results:
+            match = _MAGICBRICKS_LISTING_URL_RE.match(r.href)
+            if match is None:
+                continue
+            listing_id = match.group("id").lower()
+            if listing_id in seen_listing_ids:
+                continue
+            seen_listing_ids.add(listing_id)
+            # Keep the original URL (the slug helps SEO / readability when
+            # the user clicks through). The ID is enough for dedup.
+            urls.append(r.href)
             if len(urls) >= limit:
                 break
         return urls

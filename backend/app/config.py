@@ -67,6 +67,16 @@ class Settings(BaseSettings):
     # listing is one HTTP round-trip to Airbnb.
     airbnb_max_listings_per_search: int = 10
 
+    # --- MagicBricks scraping (Part 4) ---
+    # Master kill switch, mirrors AIRBNB_SCRAPE_ENABLED. Default OFF.
+    magicbricks_scrape_enabled: bool = False
+    # Per-request polite delay. Akamai-backed site; 5s avoids obvious
+    # hammering without simulating a human session.
+    magicbricks_request_delay_seconds: float = 5.0
+    # Keep small — MB listings turn over (410 Gone is common) and each
+    # request is a real HTTP round-trip.
+    magicbricks_max_listings_per_search: int = 5
+
     # --- Pipeline ---
     default_cities: list[str] = [
         "Mumbai",

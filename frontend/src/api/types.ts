@@ -255,10 +255,13 @@ export interface SearchResultItem {
   sub_scores: SearchSubScore[];
   features: Record<string, unknown>;
   // Surfaced separately from `features` so the card doesn't have to dig.
-  // Airbnb-sourced rows populate both; Google-Places rows leave them null
-  // and use `canonical_website` for their actual site link.
+  // External-source rows (Airbnb, MagicBricks) populate all three; Google-
+  // Places rows leave them null and use `canonical_website` for their
+  // actual site link.
+  // `source_label` drives the "View on {label} ↗" pill rendering.
   primary_image_url: string | null;
   external_url: string | null;
+  source_label: string | null;
 }
 
 export interface SearchResponse {

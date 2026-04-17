@@ -138,7 +138,7 @@ def test_airbnb_listing_dataclass_shape() -> None:
     assert listing.description is None
     assert listing.amenities == []
     assert listing.image_urls == []
-    assert listing.raw_json_top_keys == []
+    assert listing.raw_top_keys == []
 
 
 def test_extract_image_gallery_pulls_dedup_capped_urls() -> None:

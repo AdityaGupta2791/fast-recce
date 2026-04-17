@@ -58,11 +58,14 @@ class SearchResultItem(BaseModel):
     features: dict[str, Any] = Field(default_factory=dict)
 
     # Surfaced separately so the frontend doesn't have to dig into features:
-    # - `primary_image_url` is the listing's hero photo (Airbnb-sourced rows)
-    # - `external_url` is the third-party listing URL (e.g. airbnb.com/rooms/<id>)
-    #   Google-Places-sourced rows leave both null and use `canonical_website`.
+    # - `primary_image_url` is the listing's hero photo (external-source rows)
+    # - `external_url` is the third-party listing URL (airbnb.com, magicbricks.com)
+    # - `source_label` is the human-readable source name used in the
+    #   "View on {source_label} ↗" pill ("Airbnb", "MagicBricks"); null for
+    #   Google-Places / legacy rows that use `canonical_website` instead.
     primary_image_url: str | None = None
     external_url: str | None = None
+    source_label: str | None = None
 
 
 class SearchResponse(BaseModel):
@@ -75,5 +78,6 @@ class SearchResponse(BaseModel):
     candidates_skipped_known: int
     candidates_filtered_non_shoot: int = 0
     airbnb_listings_scraped: int = 0
+    magicbricks_listings_scraped: int = 0
     duration_seconds: float
     errors: list[str] = Field(default_factory=list)

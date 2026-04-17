@@ -12,7 +12,9 @@ from app.database import get_db
 from app.exceptions import ForbiddenError, UnauthorizedError
 from app.integrations.airbnb_scraper import AirbnbScraper
 from app.integrations.duckduckgo import DuckDuckGoClient
+from app.integrations.external_listing_source import ExternalListingSource
 from app.integrations.google_places import GooglePlacesClient
+from app.integrations.magicbricks_scraper import MagicBricksScraper
 from app.integrations.llm import LLMClient
 from app.models.user import User
 from app.services.analytics_service import AnalyticsService
@@ -90,15 +92,23 @@ async def get_search_service(
         api_key=settings.gemini_api_key,
         model=settings.gemini_model,
     )
-    # Airbnb + DuckDuckGo are optional. The scraper is only constructed when
-    # the master env flag is on — otherwise residential / generic searches
-    # degrade gracefully to Google-Places-only (with a warning in `errors`).
-    airbnb_scraper: AirbnbScraper | None = None
+    # External-listing scrapers (Airbnb + MagicBricks) are each gated on
+    # their own env flag. DDG is shared between them — we only construct it
+    # when at least one source is enabled. Residential / generic searches
+    # degrade gracefully (warning in `errors`) when all are disabled.
+    airbnb_scraper: ExternalListingSource | None = None
+    magicbricks_scraper: ExternalListingSource | None = None
     duckduckgo_client: DuckDuckGoClient | None = None
+
     if settings.airbnb_scrape_enabled:
         airbnb_scraper = AirbnbScraper(
             request_delay_seconds=settings.airbnb_request_delay_seconds,
         )
+    if settings.magicbricks_scrape_enabled:
+        magicbricks_scraper = MagicBricksScraper(
+            request_delay_seconds=settings.magicbricks_request_delay_seconds,
+        )
+    if airbnb_scraper is not None or magicbricks_scraper is not None:
         duckduckgo_client = DuckDuckGoClient()
     try:
         async with google_client:
@@ -134,8 +144,10 @@ async def get_search_service(
                 scoring_service=scoring_service,
                 briefing_service=briefing_service,
                 airbnb_scraper=airbnb_scraper,
+                magicbricks_scraper=magicbricks_scraper,
                 duckduckgo_client=duckduckgo_client,
                 airbnb_max_listings_per_search=settings.airbnb_max_listings_per_search,
+                magicbricks_max_listings_per_search=settings.magicbricks_max_listings_per_search,
             )
     finally:
         await llm_client.close()
